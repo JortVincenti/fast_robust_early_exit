@@ -25,8 +25,10 @@ import logging
 import os
 import sys
 import nltk
+nltk.download('punkt')
 import numpy as np
 from copy import deepcopy
+from filelock import FileLock
 
 import datasets
 import evaluate
@@ -232,10 +234,13 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
     # Preprocessing the datasets.
     # We need to generate and tokenize inputs and targets.
+    print(raw_datasets.keys()) 
     if training_args.do_train:
         column_names = raw_datasets["train"].column_names
     elif training_args.do_eval:
-        column_names = raw_datasets["validation"].column_names
+        #column_names = raw_datasets["validation"].column_names  ## this is original line
+        subset_validation = raw_datasets["validation"].select(range(200))
+        column_names = subset_validation.column_names
     elif training_args.do_predict:
         column_names = raw_datasets["test"].column_names
     else:
