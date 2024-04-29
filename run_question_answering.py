@@ -217,8 +217,15 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # Create a hook function that will capture top-k outputs
         def create_hook(layer_id):
             def hook(module, input, output):
-                # Assuming the output is the last hidden state (adjust based on the actual output structure)
-                logits = output.last_hidden_state
+                # print("Output Type:", type(output))
+                # print("Output Contents:", output)
+
+                # Now handle the output based on the observed structure
+                if isinstance(output, tuple):
+                    logits = output[0]  # Adjust based on the observed structure
+                else:
+                    logits = output.last_hidden_state  # Adjust if this applies
+
                 top_k_values, top_k_indices = torch.topk(logits, top_k, dim=-1)
                 outputs[layer_id] = (top_k_values.cpu(), top_k_indices.cpu())
             return hook
@@ -651,7 +658,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-        print(layer_outputs)
+        print("layer_out", layer_outputs)
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
