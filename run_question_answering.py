@@ -209,6 +209,27 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+
+    def attach_hooks_to_model(model, layer_count, top_k=1):
+        outputs = {}  # Dictionary to store outputs
+
+        def create_hook(layer_id):
+            def hook(module, input, output):
+                # Assuming the output is the last hidden state, adjust if different
+                logits = output.last_hidden_state
+                top_k_values, top_k_indices = torch.topk(logits, top_k, dim=-1)
+                outputs[layer_id] = (top_k_values, top_k_indices)
+            return hook
+
+        # Attach hooks to each transformer layer
+        for i in range(layer_count):
+            model.encoder.layer[i].register_forward_hook(create_hook(i))
+        
+        return outputs
+
+    # 12 layers iirc
+    layer_outputs = attach_hooks_to_model(model, 12, top_k=1)
+
         
     if additional_args.use_lora:
         if training_args.do_train:
@@ -234,7 +255,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
     # Preprocessing the datasets.
     # We need to generate and tokenize inputs and targets.
-    print(raw_datasets.keys()) 
+    #print(raw_datasets.keys()) 
     if training_args.do_train:
         column_names = raw_datasets["train"].column_names
     elif training_args.do_eval:
@@ -613,13 +634,19 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
     num_beams = data_args.num_beams if data_args.num_beams is not None else training_args.generation_num_beams
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
+
+        # Prepare an example input
+        # top_k_outputs = model.evaluate(model_inputs['input_ids'], model_inputs['attention_mask'])
+        # model_inputs["labels"]
+
+
         # evaluation metrics could be differ from evaluation during training
         # refer to https://discuss.huggingface.co/t/evaluation-results-metric-during-training-is-different-from-the-evaluation-results-at-the-end/15401/3
         metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-
+        print(layer_outputs)
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
