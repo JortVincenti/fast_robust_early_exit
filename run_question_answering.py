@@ -211,26 +211,30 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         use_auth_token=True if model_args.use_auth_token else None,
     )
 
-    def attach_hooks_to_model(model, layer_count, top_k=1):
+    def attach_hooks_to_t5_model(model, top_k=1):
         outputs = {}  # Dictionary to store outputs
 
+        # Create a hook function that will capture top-k outputs
         def create_hook(layer_id):
             def hook(module, input, output):
-                # Assuming the output is the last hidden state, adjust if different
+                # Assuming the output is the last hidden state (adjust based on the actual output structure)
                 logits = output.last_hidden_state
                 top_k_values, top_k_indices = torch.topk(logits, top_k, dim=-1)
-                outputs[layer_id] = (top_k_values, top_k_indices)
+                outputs[layer_id] = (top_k_values.cpu(), top_k_indices.cpu())
             return hook
 
-        # Attach hooks to each transformer layer
-        for i in range(layer_count):
-            model.encoder.layer[i].register_forward_hook(create_hook(i))
-        
+        # Attach hooks to each block in the encoder
+        for i, block in enumerate(model.encoder.block):
+            block.register_forward_hook(create_hook(f'encoder_{i}'))
+
+        # Attach hooks to each block in the decoder
+        for i, block in enumerate(model.decoder.block):
+            block.register_forward_hook(create_hook(f'decoder_{i}'))
+
         return outputs
 
-    # 12 layers iirc
-    layer_outputs = attach_hooks_to_model(model, 12, top_k=1)
-
+    # Assuming you have already instantiated your T5 model
+    layer_outputs = attach_hooks_to_t5_model(model, top_k=1)
         
     if additional_args.use_lora:
         if training_args.do_train:
