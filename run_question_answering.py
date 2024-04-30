@@ -217,9 +217,6 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # Create a hook function that will capture top-k outputs
         def create_hook(layer_id):
             def hook(module, input, output):
-                # print("Output Type:", type(output))
-                # print("Output Contents:", output)
-
                 # Now handle the output based on the observed structure
                 if isinstance(output, tuple):
                     logits = output[0]  # Adjust based on the observed structure
