@@ -1030,25 +1030,26 @@ class DeployT5Stack(T5Stack):
         
         print("*"*100)
         # topk, indices from the last logits tensor
-        topk, indices = torch.topk(previous_logits[-1], 1)
+        if len(previous_logits) > 0:
+            topk, indices = torch.topk(previous_logits[-1], 1)
 
-        # Initialize a list to store ranks at each layer
-        ranks_at_layers = []
+            # Initialize a list to store ranks at each layer
+            ranks_at_layers = []
 
-        # Loop over previous layers in reverse order, stopping at the first layer
-        for i in range(len(previous_logits) - 2, -1, -1):
-            # Get the sorted indices for this layer's logits
-            sorted_indices = torch.argsort(previous_logits[i], descending=True)
+            # Loop over previous layers in reverse order, stopping at the first layer
+            for i in range(len(previous_logits) - 2, -1, -1):
+                # Get the sorted indices for this layer's logits
+                sorted_indices = torch.argsort(previous_logits[i], descending=True)
 
-            # Find the rank of the indices obtained from the last layer in the current layer's sorted list
-            # We do this by looking for the position of each top index in the sorted indices list
-            ranks = (sorted_indices == indices).nonzero(as_tuple=True)[1]
-            
-            # Store the rank positions
-            ranks_at_layers.append(ranks)
+                # Find the rank of the indices obtained from the last layer in the current layer's sorted list
+                # We do this by looking for the position of each top index in the sorted indices list
+                ranks = (sorted_indices == indices).nonzero(as_tuple=True)[1]
+                
+                # Store the rank positions
+                ranks_at_layers.append(ranks)
 
-            print(f"Layer {i} logits shape: {previous_logits[i].shape}")
-            print(f"Rank of indices in layer {i}: {ranks}")
+                print(f"Layer {i} logits shape: {previous_logits[i].shape}")
+                print(f"Rank of indices in layer {i}: {ranks}")
                 
         print("*"*100)
         if self.config.use_synchronize: torch.cuda.synchronize()

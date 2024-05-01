@@ -211,34 +211,34 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         use_auth_token=True if model_args.use_auth_token else None,
     )
 
-    def attach_hooks_to_t5_model(model, top_k=1):
-        outputs = {}  # Dictionary to store outputs
+    # def attach_hooks_to_t5_model(model, top_k=1):
+    #     outputs = {}  # Dictionary to store outputs
 
-        # Create a hook function that will capture top-k outputs
-        def create_hook(layer_id):
-            def hook(module, input, output):
-                # Now handle the output based on the observed structure
-                if isinstance(output, tuple):
-                    logits = output[0]  # Adjust based on the observed structure
-                else:
-                    logits = output.last_hidden_state  # Adjust if this applies
+    #     # Create a hook function that will capture top-k outputs
+    #     def create_hook(layer_id):
+    #         def hook(module, input, output):
+    #             # Now handle the output based on the observed structure
+    #             if isinstance(output, tuple):
+    #                 logits = output[0]  # Adjust based on the observed structure
+    #             else:
+    #                 logits = output.last_hidden_state  # Adjust if this applies
 
-                top_k_values, top_k_indices = torch.topk(logits, top_k, dim=-1)
-                outputs[layer_id] = (top_k_values.cpu(), top_k_indices.cpu())
-            return hook
+    #             top_k_values, top_k_indices = torch.topk(logits, top_k, dim=-1)
+    #             outputs[layer_id] = (top_k_values.cpu(), top_k_indices.cpu())
+    #         return hook
 
-        # Attach hooks to each block in the encoder
-        for i, block in enumerate(model.encoder.block):
-            block.register_forward_hook(create_hook(f'encoder_{i}'))
+    #     # Attach hooks to each block in the encoder
+    #     for i, block in enumerate(model.encoder.block):
+    #         block.register_forward_hook(create_hook(f'encoder_{i}'))
 
-        # Attach hooks to each block in the decoder
-        for i, block in enumerate(model.decoder.block):
-            block.register_forward_hook(create_hook(f'decoder_{i}'))
+    #     # Attach hooks to each block in the decoder
+    #     for i, block in enumerate(model.decoder.block):
+    #         block.register_forward_hook(create_hook(f'decoder_{i}'))
 
-        return outputs
+    #     return outputs
 
-    # Assuming you have already instantiated your T5 model
-    layer_outputs = attach_hooks_to_t5_model(model, top_k=1)
+    # # Assuming you have already instantiated your T5 model
+    # layer_outputs = attach_hooks_to_t5_model(model, top_k=1)
         
     if additional_args.use_lora:
         if training_args.do_train:
@@ -655,7 +655,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-        print("layer_out", layer_outputs)
+        # print("layer_out", layer_outputs)
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
