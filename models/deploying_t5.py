@@ -39,6 +39,8 @@ from util import (
     get_skip_mask,
     BetaMixture1D,
 ) 
+from util.skip_conf import get_skip_mask_cd
+
 
 logger = logging.get_logger(__name__)
 __HEAD_MASK_WARNING_MSG = """
@@ -855,7 +857,8 @@ class DeployT5Stack(T5Stack):
         self.shallow2deep = False  # False: skip, and True: forward
         self.lm_logits = None  # to prevent calculating logits twice
 
-        previous_logits = []
+        # previous_logits = []
+        prev_probits = {}
         for i, layer_module in enumerate(self.block):
                 
             # Static framework
@@ -949,7 +952,17 @@ class DeployT5Stack(T5Stack):
                 # Early-Exit framework
                 elif self.use_early_exit and not skip_mask:
                     if self.exit_min_layer is not None and i < self.exit_min_layer: 
+                        if self.config.use_synchronize: torch.cuda.synchronize()
+                        # start = datetime.datetime.now()
+                        _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
+                        lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
+                            else lm_head(_hidden_states * (self.config.d_model ** -0.5))
+                        
+                        probits = torch.softmax(lm_logits, dim=-1)
+                        probits = torch.squeeze(probits)
+                        prev_probits[i] = probits
                         self.block_op[i] += 1
+
                     else:
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         start = datetime.datetime.now()
@@ -957,30 +970,41 @@ class DeployT5Stack(T5Stack):
                         lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
                             else lm_head(_hidden_states * (self.config.d_model ** -0.5))
 
-                        ## then teh logit comparison needs to be done here
-                        previous_logits.append(lm_logits)
-                        ## comparing them only when we are exiting. 
-                        mid_index = len(previous_logits) // 2
-                        last_index = len(previous_logits) - 1
-                        if len(previous_logits) % 2 == 0:  # if the array length is even
-                            lm_logits = previous_logits[last_index] - previous_logits[mid_index]
-                        else:  # if the array length is odd
-                            lm_logits = previous_logits[last_index] - previous_logits[mid_index]
-                        
-                        skip_mask = get_skip_mask(
-                            lm_logits,
-                            _hidden_states,
-                            cm_head,
-                            config=self.config,
-                            pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
-                        )
+                        # previous_logits.append(lm_logits)
+
+                        if self.config.exit_conf_type == "contrastive_decoding":
+                            
+
+                            skip_mask = get_skip_mask_cd(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                                layer_exp = i,
+                                prev_probits = prev_probits, 
+                                layer_am = i//2,
+                                alpha = 0.1,
+                                )
+                            
+                        else:
+                            # prev_logits.append(lm_logits)
+                            skip_mask = get_skip_mask(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
+                            )
                         
                         if not skip_mask: self.block_op[i] += 1                    
-                        if skip_mask: self.lm_logits = lm_logits # I would assume this is where the logits get checked for whether they satisfy the threshold
+                        if skip_mask: 
+                            # print(f"Layer {i}")
+                            self.lm_logits = lm_logits # This is where the logits are sent to do the predictions.
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
-                    
+
                 # Normal framework
                 elif (not self.use_shallow_deep and not self.use_early_exit):
                     self.block_op[i] += 1
