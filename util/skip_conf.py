@@ -75,6 +75,10 @@ def get_skip_mask(
     )
     mask = torch.where(conf <= threshold, 0., 1.).bool()
     
+    print("Are we early exiting?", mask.item() == 1)
+    print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
+
+
     if not return_conf:
         return mask.item()  # False (0) and True (1) denote keep and exit
     else:
