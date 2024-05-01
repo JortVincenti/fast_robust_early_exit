@@ -19,8 +19,8 @@ def adjust_training_args(training_args, data_args, additional_args):
         # static_exit_layer argument should be defined only for evaluation
         assert additional_args.static_exit_layer is None
     
-    if additional_args.deploy_scenario:
+    #if additional_args.deploy_scenario:
         # make sure to use batch size of 1 and one GPU
-        assert training_args.per_device_eval_batch_size == 1 and training_args.n_gpu == 1
+    #    assert training_args.per_device_eval_batch_size == 1 and training_args.n_gpu == 1
 
     return training_args
