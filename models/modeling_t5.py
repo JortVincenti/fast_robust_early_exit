@@ -49,8 +49,18 @@ If you do not want to use any `decoder_head_mask` now, please set `decoder_head_
 num_heads)`.
 """
 
-
+####### Custom Attention Class #######
 class EffT5Attention(T5Attention):
+    """
+        Initialize the Efficient T5 Attention layer.
+
+        Args:
+            config (T5Config): Configuration object with model parameters.
+            has_relative_attention_bias (bool): Flag to indicate if relative attention biases are used.
+
+        The constructor extends the base T5Attention with specific configurations, and initializes
+        additional neural network layers if relative attention biases are enabled.
+    """
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
         self.is_decoder = config.is_decoder
@@ -64,15 +74,17 @@ class EffT5Attention(T5Attention):
         self.inner_dim = self.n_heads * self.key_value_proj_dim
 
         # Mesh TensorFlow initialization to avoid scaling before softmax
+        # Initialize linear transformations for queries, keys, values, and outputs        
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
         if self.has_relative_attention_bias:
+            # Initialize an embedding matrix for relative attention biases if required
             self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
-        self.pruned_heads = set()
-        self.gradient_checkpointing = False
+        self.pruned_heads = set() # Keep track of any pruned heads
+        self.gradient_checkpointing = False  # Disable gradient checkpointing by default
 
     def forward(
         self,
@@ -89,20 +101,41 @@ class EffT5Attention(T5Attention):
     ):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
+        
+        Define the forward pass for the Efficient T5 Attention mechanism.
+
+        Args:
+            hidden_states (Tensor): Input feature representations from previous layer.
+            mask (Tensor, optional): Attention mask to avoid attention to certain positions.
+            key_value_states (Tensor, optional): Key and value states for attention; if None, self-attention is applied.
+            position_bias (Tensor, optional): Bias terms for positions to add controlled attention.
+            past_key_value (Tuple[Tensor], optional): Cached key and value states from previous time steps.
+            layer_head_mask (Tensor, optional): Mask to nullify attention at specific heads.
+            query_length (int, optional): The length of the query vectors.
+            use_cache (bool, optional): If True, returns a tuple with present key and value states.
+            output_attentions (bool, optional): If True, output attention weights.
+            skip_mask (Tensor, optional): Mask to skip the computation for certain elements.
+
+        The forward method projects the input hidden states into queries, keys, and values,
+        computes the attention scores, applies softmax to obtain the weights, and finally,
+        computes the attended representations. Optionally handles caching for efficient decoding.
         """
         # Input is (batch_size, seq_length, dim)
         # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
         # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
-        batch_size, seq_length = hidden_states.shape[:2]
 
+        # Calculate batch size and sequence length from hidden states        
+        batch_size, seq_length = hidden_states.shape[:2]
         real_seq_length = seq_length
 
+        # Handling past key values for incremental decoding
         if past_key_value is not None:
             assert (
                 len(past_key_value) == 2
             ), f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
             real_seq_length += past_key_value[0].shape[2] if query_length is None else query_length
 
+        # Determine the length of keys/values based on whether it's self-attention or cross-attention
         key_length = real_seq_length if key_value_states is None else key_value_states.shape[1]
 
         def shape(states):
@@ -224,9 +257,20 @@ class EffT5Attention(T5Attention):
             outputs = outputs + (ids_restore,)
         return outputs
 
-
+####### Custom Layer Classes for Self and Cross Attention #######
 class EffT5LayerSelfAttention(T5LayerSelfAttention):
     def __init__(self, config, has_relative_attention_bias=False):
+        """
+        Initializes the Efficient T5 Layer for Self-Attention.
+        
+        Args:
+            config (T5Config): Configuration object with model parameters.
+            has_relative_attention_bias (bool): Indicates if relative attention biases should be utilized.
+        
+        This constructor initializes the self-attention mechanism using the EffT5Attention class,
+        sets up the normalization and dropout layers. It enhances the base T5LayerSelfAttention
+        by potentially incorporating relative attention biases.
+        """
         super().__init__(config, has_relative_attention_bias)
         self.SelfAttention = EffT5Attention(config, has_relative_attention_bias=has_relative_attention_bias)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
@@ -243,6 +287,28 @@ class EffT5LayerSelfAttention(T5LayerSelfAttention):
         output_attentions=False,
         skip_mask=None,
     ):
+        """
+        Processes input through the self-attention layer.
+
+        Args:
+            hidden_states (Tensor): Input tensor to the layer.
+            attention_mask (Tensor, optional): Mask to avoid attending to certain positions.
+            position_bias (Tensor, optional): Additional bias to add to attention logits.
+            layer_head_mask (Tensor, optional): Mask to nullify attention at specific heads.
+            past_key_value (Tuple[Tensor, Tensor], optional): Cached past key and value tensors for incremental decoding.
+            use_cache (bool, optional): If True, key and value tensors will be returned for caching.
+            output_attentions (bool, optional): If True, attention weights will be returned.
+            skip_mask (Tensor, optional): Mask to skip the computation for certain elements.
+        
+        Returns:
+            Tuple of Tensors: This can include the updated hidden states, cached key-value pairs,
+            attention weights depending on the configuration, and optionally restoration indices if skip_mask is used.
+        
+        The method first normalizes the input hidden states, then processes them through the self-attention mechanism.
+        If `skip_mask` is provided, it selectively computes attention for unmasked elements to save computations.
+        The resulting attended tensor is then added to the original input tensor to form a residual connection.
+        Finally, dropout is applied before returning the output.
+        """
         normed_hidden_states = self.layer_norm(hidden_states)
         attention_output = self.SelfAttention(
             normed_hidden_states,
@@ -318,7 +384,7 @@ class EffT5LayerCrossAttention(T5LayerCrossAttention):
             outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them     
         return outputs
 
-
+####### Custom Block Class including Self and Cross Attention Layers #######
 class EffT5Block(T5Block):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
@@ -451,7 +517,7 @@ class EffT5Block(T5Block):
 
         return outputs  # hidden-states, present_key_value_states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
 
-
+####### Custom Stack Class comprising of multiple blocks #######
 class EffT5Stack(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
@@ -664,6 +730,7 @@ class EffT5Stack(T5Stack):
                 
                 # exploit early-exit mask: softmax and meta
                 elif self.is_decoder and auto_reg and self.use_early_exit and i > 0:
+                    print('Decoding layer:', i)
                     if self.skip_mask_cache is None or (self.skip_mask_cache.shape[0] != self.skip_mask_cache.sum().item()):
                         hidden_ = copy.deepcopy(hidden_states)
                         if self.skip_mask_cache is not None:  # self.skip_mask_cache.shape[0] != self.skip_mask_cache.sum().item()
@@ -674,20 +741,21 @@ class EffT5Stack(T5Stack):
                         logits = lm_head(hidden_) if not self.config.tie_word_embeddings \
                             else lm_head(hidden_ * (self.config.d_model ** -0.5))
                         
-                        ## then teh logit comparison needs to be done here
-                        previous_logits.append(logits)
-                        print("lm_logits difference:\n")
-                        ## comparing them only when we are exiting. 
-                        mid_index = len(previous_logits) // 2
-                        last_index = len(previous_logits) - 1
-                        if len(previous_logits) % 2 == 0:  # if the array length is even
-                            print(previous_logits[last_index] - previous_logits[mid_index])
-                            logits = previous_logits[last_index] - previous_logits[mid_index]
-                        else:  # if the array length is odd
-                            print(previous_logits[last_index] - previous_logits[mid_index])
-                            logits = previous_logits[last_index] - previous_logits[mid_index]
+                        # ## then teh logit comparison needs to be done here
+                        # previous_logits.append(logits)
+                        # print("lm_logits difference:\n")
+                        # ## comparing them only when we are exiting. 
+                        # mid_index = len(previous_logits) // 2
+                        # last_index = len(previous_logits) - 1
+                        # print("Comparing logits at index:", mid_index, "and", last_index)
+                        # if len(previous_logits) % 2 == 0:  # if the array length is even
+                        #     print((previous_logits[last_index] - previous_logits[mid_index]).mean())
+                        #     logits = previous_logits[last_index] - previous_logits[mid_index]
+                        # else:  # if the array length is odd
+                        #     print((previous_logits[last_index] - previous_logits[mid_index]).neam())
+                        #     logits = previous_logits[last_index] - previous_logits[mid_index]
                         
-                        print("performed logits difference\n")
+                        # print("performed logits difference\n")
 
                         skip_mask = get_skip_mask(
                             logits,
@@ -773,7 +841,7 @@ class EffT5Stack(T5Stack):
             cross_attentions=all_cross_attentions,
         )
 
-
+####### Model Class for Conditional Generation #######
 class EffT5ForConditionalGeneration(T5ForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
@@ -894,7 +962,7 @@ class EffT5ForConditionalGeneration(T5ForConditionalGeneration):
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
         )
-    
+    ####### Additional Functions to support the model's operations #######
     def compute_model_loss(self, lm_logits=None, labels=None):
         loss = None
         if labels is not None:
