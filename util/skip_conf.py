@@ -48,16 +48,12 @@ def contrastive_confidence(
 
     assert lm_logits is not None
 
-    # print("Inside contrastive confidence")
-    # print("probits_exp", probits_exp)
-    # print("probits_exp size", probits_exp.shape)
 
+    ## calculate current layer probabilities
     probits_exp = torch.softmax(lm_logits, dim=-1)
     probits_exp = torch.squeeze(probits_exp)
     prev_probits[layer_exp] = probits_exp
-
-
-    ## calculate current layer probabilities
+   
     # probs_exp = torch.softmax(logits_at, dim=-1)
     max_probs_exp = torch.max(probits_exp)
 
@@ -72,20 +68,9 @@ def contrastive_confidence(
 
     mask = probits_exp >= alpha * max_probs_exp
 
-    s[mask] = torch.log(probits_exp[mask]) - torch.log(probits_am[mask])
+    s[mask] = torch.softmax(torch.log(probits_exp[mask]) - torch.log(probits_am[mask]), dim=-1)
     
-    # # print("probits_am.shape", probits_am.shape)
-    # # assert probits_exp.shape == probits_am.shape
-    # for idx, (x_t_exp, x_t_am) in enumerate(zip(probits_exp, probits_am)):
-    #     # print("max_probs_exp", max_probs_exp)
-    #     # print("x_t_exp", x_t_exp)
-    #     # print("x_t_exp size", x_t_exp.shape)
-    #     # print("alpha", alpha)
-    #     # print("alpha * max_probs_exp", alpha * max_probs_exp)
-    #     if x_t_exp >= alpha * max_probs_exp:
-    #         s[idx] = torch.log(x_t_exp) - torch.log(x_t_am)
-
-    # print("s.shape", s.shape)
+    
     top_2 = torch.topk(s, dim=-1, k=2)[0]
     
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
@@ -152,6 +137,9 @@ def get_skip_mask_cd(
 
     mask = torch.where(conf <= threshold, 0., 1.).bool()
 
+    print("Are we early exiting?", mask.item() == 1)
+    print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
+
     # print("mask", mask)
     # print("mask shape", mask.shape)
     
@@ -193,12 +181,10 @@ def get_skip_mask(
         classifier=classifier,
         )
     
-    # print("confidence return", conf)
-
     mask = torch.where(conf <= threshold, 0., 1.).bool()
 
-    # print("mask", mask)
-    # print("mask shape", mask.shape)
+    print("Are we early exiting?", mask.item() == 1)
+    print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
     
     
     if not return_conf:
