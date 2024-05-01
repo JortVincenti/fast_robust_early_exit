@@ -640,6 +640,13 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
                       constant_values=np.nan)
                for arr in data]
 
+        # Convert the list of arrays into a single NumPy array
+        padded_array = np.array(padded_data)
+
+        # Compute the mean of the first column
+        first_column_mean = np.nanmean(padded_array[:, 0])  # Use nanmean to ignore NaNs
+
+        print("Mean of the first column:", first_column_mean)
         # Plotting each array
         plt.figure(figsize=(10, 6))
         for idx, arr in enumerate(padded_data):
