@@ -587,6 +587,7 @@ class EffT5Stack(T5Stack):
         hidden_states = self.dropout(inputs_embeds)
 
         skip_mask, self.skip_mask_cache = None, None
+        previous_logits = []
         for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
             if self.is_decoder and self.config.static_exit_layer is not None:
                 if i == self.config.static_exit_layer: break
@@ -672,6 +673,21 @@ class EffT5Stack(T5Stack):
                         hidden_ = self.dropout(self.final_layer_norm(hidden_))
                         logits = lm_head(hidden_) if not self.config.tie_word_embeddings \
                             else lm_head(hidden_ * (self.config.d_model ** -0.5))
+                        
+                        ## then teh logit comparison needs to be done here
+                        previous_logits.append(logits)
+                        print("lm_logits difference:\n")
+                        ## comparing them only when we are exiting. 
+                        mid_index = len(previous_logits) // 2
+                        last_index = len(previous_logits) - 1
+                        if len(previous_logits) % 2 == 0:  # if the array length is even
+                            print(previous_logits[last_index] - previous_logits[mid_index])
+                            logits = previous_logits[last_index] - previous_logits[mid_index]
+                        else:  # if the array length is odd
+                            print(previous_logits[last_index] - previous_logits[mid_index])
+                            logits = previous_logits[last_index] - previous_logits[mid_index]
+                        
+                        print("performed logits difference\n")
 
                         skip_mask = get_skip_mask(
                             logits,

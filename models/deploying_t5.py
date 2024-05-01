@@ -946,14 +946,18 @@ class DeployT5Stack(T5Stack):
 
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
-
+                        print("lm_logits difference:\n")
                         ## comparing them only when we are exiting. 
                         mid_index = len(previous_logits) // 2
                         last_index = len(previous_logits) - 1
                         if len(previous_logits) % 2 == 0:  # if the array length is even
+                            print(previous_logits[last_index] - previous_logits[mid_index])
                             lm_logits = previous_logits[last_index] - previous_logits[mid_index]
                         else:  # if the array length is odd
+                            print(previous_logits[last_index] - previous_logits[mid_index])
                             lm_logits = previous_logits[last_index] - previous_logits[mid_index]
+                        
+                        print("performed logits difference\n")
                         
                         skip_mask = get_skip_mask(
                             lm_logits,
@@ -964,7 +968,7 @@ class DeployT5Stack(T5Stack):
                         )
                         
                         if not skip_mask: self.block_op[i] += 1                    
-                        if skip_mask: self.lm_logits = lm_logits # I would assume this is where the logits get checked for whether they satisfy the threshold #Matteo: I'd say the same
+                        if skip_mask: self.lm_logits = lm_logits # I would assume this is where the logits get checked for whether they satisfy the threshold
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
