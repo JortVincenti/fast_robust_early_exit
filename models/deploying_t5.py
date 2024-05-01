@@ -532,6 +532,7 @@ class DeployT5Block(T5Block):
 class DeployT5Stack(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
+        self.graph_top_k_list = []
         
         self.embed_tokens = embed_tokens
         self.is_decoder = config.is_decoder
@@ -1035,6 +1036,39 @@ class DeployT5Stack(T5Stack):
             if self.config.use_synchronize: torch.cuda.synchronize()
             if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
         
+
+        #print("*"*100)
+        # topk, indices from the last logits tensor
+        
+        if len(previous_logits) > 0:
+            #print(len(previous_logits))
+            #print("Previous logits", torch.topk(previous_logits[-1], 1))
+            index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
+            #print("last fist index", index_top_1)
+            # Initialize a list to store ranks at each layer
+            ranks_at_layers = []
+
+            # Loop over previous layers in reverse order, stopping at the first layer
+            for i in range(len(previous_logits) - 1, -1, -1):
+                # Get the sorted indices for this layer's logits
+                sorted_indices = torch.argsort(previous_logits[i], descending=True)
+
+                # Find the rank of the indices obtained from the last layer in the current layer's sorted list
+                # We do this by looking for the position of each top index in the sorted indices list
+                rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
+
+                
+                # Store the rank positions
+                ranks_at_layers.append(rank[0])
+
+                #print(f"Layer {i} logits shape: {previous_logits[i].shape}")
+                #print(f"Rank of indices in layer {i}: {rank}")
+            ranks_at_layers.reverse()
+            ranks_at_layers.append(0)
+            #print("Full layers", ranks_at_layers, len(ranks_at_layers))
+            self.graph_top_k_list.append(ranks_at_layers)
+        #print("*"*100)
+
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
         if not skip_mask and self.lm_logits is None: # If threshold is "not satisfied", then compute the new block logits

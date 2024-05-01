@@ -74,6 +74,8 @@ def get_skip_mask(
         classifier=classifier,
     )
     mask = torch.where(conf <= threshold, 0., 1.).bool()
+
+    #print(f"Confidence: {conf.item():.4f}, Threshold: {threshold:.4f}, Mask: {mask.item()}")
     
     if not return_conf:
         return mask.item()  # False (0) and True (1) denote keep and exit

@@ -28,6 +28,18 @@ import nltk
 import numpy as np
 from copy import deepcopy
 
+# # Populate the density array
+# import time
+
+# import numpy as np
+# from numpy.polynomial import polynomial
+# import pandas as pd
+
+# import matplotlib.pyplot as plt
+# import datashader as ds
+# import datashader.transfer_functions as tf
+
+
 import datasets
 import evaluate
 import transformers
@@ -60,6 +72,8 @@ from util import (
     AdditionalArguments,
     update_autoconfig,
 )
+
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +625,90 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # evaluation metrics could be differ from evaluation during training
         # refer to https://discuss.huggingface.co/t/evaluation-results-metric-during-training-is-different-from-the-evaluation-results-at-the-end/15401/3
         metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
+
+        data = model.decoder.graph_top_k_list
+
+        max_length = max(len(arr) for arr in data)
+
+        # Pad arrays with NaNs to ensure they are all the same length
+        padded_data = [np.pad(np.array(arr, dtype=float),  # Convert array to float
+                      (0, max_length - len(arr)),
+                      mode='constant',
+                      constant_values=np.nan)
+               for arr in data]
+
+        # Plotting each array
+        plt.figure(figsize=(10, 6))
+        for idx, arr in enumerate(padded_data):
+            plt.plot(arr, label=f'Line {idx + 1}', color='blue', alpha=0.2)  # Set color and transparency
+
+
+        # Add legend, labels, and title
+        plt.xlabel("Block Number")
+        plt.ylabel("Ranking Value")
+        plt.title("Top K List Ranking Values")
+        plt.grid(True)
+
+        # Show the plot
+        plt.savefig("top_k_list.png")
+
+        #https://stackoverflow.com/questions/47175398/line-based-heatmap-or-2d-line-histogram
+        # Determine the maximum length of the arrays to set the x-axis
+        # Calculate the maximum length of the sublists
+
+        # Each column is one data sample
+        # df = data
+
+        # # Following will append a nan-row and reshape the dataframe into two columns, with each sample stacked on top of each other
+        # #   THIS IS CRUCIAL TO OPTIMIZE SPEED: https://github.com/bokeh/datashader/issues/286
+
+        # # Append row with nan-values
+        # df = df.append(pd.DataFrame([np.array([np.nan] * len(df.columns))], columns=df.columns, index=[np.nan]))
+
+        # # Reshape
+        # x, y = df.shape
+        # arr = df.as_matrix().reshape((x * y, 1), order='F')
+        # df_reshaped = pd.DataFrame(arr, columns=list('y'), index=np.tile(df.index.values, y))
+        # df_reshaped = df_reshaped.reset_index()
+        # df_reshaped.columns.values[0] = 'x'
+
+        # # Plotting parameters
+        # x_range = (min(df.index.values), max(df.index.values))
+        # y_range = (df.min().min(), df.max().max())
+        # w = 1000
+        # h = 750
+        # dpi = 150
+        # cvs = ds.Canvas(x_range=x_range, y_range=y_range, plot_height=h, plot_width=w)
+
+        # # Aggregate data
+        # t0 = time.time()
+        # aggs = cvs.line(df_reshaped, 'x', 'y', ds.count())
+
+
+        # # One colored plot
+        # t1 = time.time()
+        # stacked_img = tf.Image(tf.shade(aggs, cmap=["darkblue", "darkblue"]))
+        # print("Time to create stacked image: {}".format(time.time() - t1))
+
+        # # Save
+        # f0 = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
+        # ax0 = f0.add_subplot(111)
+        # ax0.imshow(stacked_img.to_pil())
+        # ax0.grid(False)
+        # f0.savefig("stacked.png", bbox_inches="tight", dpi=dpi)
+
+        # # Heat map - This uses a equalized histogram (built-in default), there are other options, though.
+        # t2 = time.time()
+        # heatmap_img = tf.Image(tf.shade(aggs, cmap=plt.cm.Spectral_r))
+        # print("Time to create stacked image: {}".format(time.time() - t2))
+
+        # # Save
+        # f1 = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
+        # ax1 = f1.add_subplot(111)
+        # ax1.imshow(heatmap_img.to_pil())
+        # ax1.grid(False)
+        # f1.savefig("heatmap.png", bbox_inches="tight", dpi=dpi)
+
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
