@@ -11,6 +11,7 @@ import datetime
 import warnings
 import numpy as np
 import torch
+from einops import rearrange
 # torch.set_num_threads(4)
 # torch.set_num_interop_threads(4)
 import torch.distributed as dist
@@ -57,28 +58,46 @@ GreedySearchOutput = Union[GreedySearchEncoderDecoderOutput, GreedySearchDecoder
 
 class DeployT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
+        """
+        Initialize the Deploy T5 Attention layer.
+
+        What's New:
+        - Initialization of configuration and model parameters.
+        - Initialization of Mesh TensorFlow to avoid scaling before softmax.
+        - Initialization of additional neural network layers if relative attention biases are enabled.
+
+        Args:
+            config (T5Config): Configuration object with model parameters.
+            has_relative_attention_bias (bool): Flag to indicate if relative attention biases are used.
+
+        The constructor extends the base T5Attention with specific configurations, and initializes
+        additional neural network layers if relative attention biases are enabled.
+        """
         super().__init__(config, has_relative_attention_bias)
         self.config = config
-        self.is_decoder = config.is_decoder
-        self.has_relative_attention_bias = has_relative_attention_bias
-        self.relative_attention_num_buckets = config.relative_attention_num_buckets
-        self.relative_attention_max_distance = config.relative_attention_max_distance
-        self.d_model = config.d_model
-        self.key_value_proj_dim = config.d_kv
-        self.n_heads = config.num_heads
-        self.dropout = config.dropout_rate
-        self.inner_dim = self.n_heads * self.key_value_proj_dim
+        ####### Initialization of configuration and model parameters #######        
+        self.is_decoder = config.is_decoder  # Boolean indicating if this is a decoder module
+        self.has_relative_attention_bias = has_relative_attention_bias  # Boolean for relative attention bias usage
+        self.relative_attention_num_buckets = config.relative_attention_num_buckets  # Number of buckets for relative attention
+        self.relative_attention_max_distance = config.relative_attention_max_distance  # Maximum distance for relative attention
+        self.d_model = config.d_model  # Dimension of the model
+        self.key_value_proj_dim = config.d_kv  # Dimension for key/value projections
+        self.n_heads = config.num_heads  # Number of attention heads
+        self.dropout = config.dropout_rate  # Dropout rate
+        self.inner_dim = self.n_heads * self.key_value_proj_dim  # Compute the inner dimension for the model
 
-        # Mesh TensorFlow initialization to avoid scaling before softmax
-        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
+        ####### Mesh TensorFlow initialization to avoid scaling before softmax #######
+        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)  # Linear transformation for query
+        self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)  # Linear transformation for key
+        self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)  # Linear transformation for value
+        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)  # Linear transformation to output from attention heads
 
+        ####### Initialization of additional neural network layers if relative attention biases are enabled #######
         if self.has_relative_attention_bias:
             self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
         self.pruned_heads = set()
         self.gradient_checkpointing = False
+
 
     def forward(
         self,
@@ -102,12 +121,14 @@ class DeployT5Attention(T5Attention):
         # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
         # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
         
+        # Input and output preparation for attention operation
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
-        batch_size, seq_length = hidden_states.shape[:2]
+        _, seq_length = hidden_states.shape[:2]
 
         real_seq_length = seq_length        
 
+        ####### Handling of past key-value states for incremental decoding ####### 
         if past_key_value is not None:
             assert (
                 len(past_key_value) == 2
@@ -120,42 +141,33 @@ class DeployT5Attention(T5Attention):
 
         key_length = real_seq_length if key_value_states is None else key_value_states.shape[1]
 
-        def shape(states):
-            """projection"""
-            return states.view(states.shape[0], -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
-
-        def unshape(states):
-            """reshape"""
-            return states.transpose(1, 2).contiguous().view(states.shape[0], -1, self.inner_dim)
-
         def project(hidden_states, proj_layer, key_value_states, past_key_value):
-            """projects hidden states correctly to key/query states"""
+            """Projects input states into query, key, or value states for attention."""
             if key_value_states is None:
-                # self-attn
+                # Self-attention projection
                 # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = shape(proj_layer(hidden_states))
+                hidden_states = rearrange(proj_layer(hidden_states), 'b l (h d) -> b h l d', h=self.n_heads)
             elif past_key_value is None:
-                # cross-attn
+                # Cross-attention projection when there is no past key value
                 # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = shape(proj_layer(key_value_states))
+                hidden_states = rearrange(proj_layer(key_value_states), 'b l (h d) -> b h l d', h=self.n_heads)
 
             if past_key_value is not None:
                 if key_value_states is None:
-                    # self-attn
+                    # Append past key or value states for self-attention
                     # (batch_size, n_heads, key_length, dim_per_head)
                     hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
                 elif past_key_value.shape[2] != key_value_states.shape[1]:
-                    # checking that the `sequence_length` of the `past_key_value` is the same as
-                    # the provided `key_value_states` to support prefix tuning
-                    # cross-attn
+                    # Handle mismatch in sequence lengths between past states and current key-value states
+                    # Cross-attention
                     # (batch_size, n_heads, seq_length, dim_per_head)
-                    hidden_states = shape(proj_layer(key_value_states))
+                    hidden_states = rearrange(proj_layer(key_value_states), 'b l (h d) -> b h l d', h=self.n_heads)
                 else:
-                    # cross-attn
+                    # Use past key or value states directly in cross-attention
                     hidden_states = past_key_value
             return hidden_states
         
-        # get key/value states
+        ####### Compute key and value states from hidden states #######
         if self.is_decoder and key_value_states is None and stack_hidden_states is not None:
             _hidden_states = torch.cat((stack_hidden_states,) + (hidden_states,), dim=1)
         else:
@@ -170,40 +182,45 @@ class DeployT5Attention(T5Attention):
         if self.config.use_synchronize: torch.cuda.synchronize()
         if self.is_decoder: self.key_value_gen_time = (datetime.datetime.now() - start)
 
-        # non-autoregressively generate key_value_states for the past skipped tokens
+        ####### Generate cross-attention key-value pairs for past skipped tokens (if specified) #######
         if gen_cross_attn_key_value:
             return [key_states, value_states]
         
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
+
+        ####### Initialize or use provided position bias for attention computation #######                
         if position_bias is None:
             if not self.has_relative_attention_bias:
+                # Default position bias for models without relative attention bias                
                 position_bias = torch.zeros(
                     (1, self.n_heads, real_seq_length, key_length), device=hidden_states.device, dtype=hidden_states.dtype
                 )
                 if self.gradient_checkpointing and self.training:
                     position_bias.requires_grad = True
             else:
+                # Compute position bias using a learned embedding table
                 position_bias = self.compute_bias(real_seq_length, key_length, device=hidden_states.device)
 
             # if key and values are already calculated
             # we want only the last query position bias
+            # Adjust position bias based on past states if necessary  
             if past_key_value is not None:
                 position_bias = position_bias[:, :, -hidden_states.size(1):, :]
 
             if mask is not None:
+                # Apply mask to position bias for padded tokens or future tokens in causal attention
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
-                
+
+        ####### Skip mask computation if not required ######## 
         if skip_mask:
             attn_output = None
         else:
             # get query states
-            query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
+            query_states = rearrange(self.q(hidden_states), 'b l (h d) -> b h l d', h=self.n_heads)
 
             # compute scores
-            scores = torch.matmul(
-                query_states, key_states.transpose(3, 2)
-            )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+            scores = torch.einsum("bhid,bhjd->bhij", query_states, key_states)
 
             if self.pruned_heads:
                 mask = torch.ones(position_bias.shape[1])
@@ -213,9 +230,7 @@ class DeployT5Attention(T5Attention):
                 position_bias_masked = position_bias
             scores += position_bias_masked
 
-            attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
-                scores
-            )  # (batch_size, n_heads, seq_length, key_length)
+            attn_weights = nn.functional.softmax(scores.float(), dim=-1)
             attn_weights = nn.functional.dropout(
                 attn_weights, p=self.dropout, training=self.training
             )  # (batch_size, n_heads, seq_length, key_length)
@@ -224,14 +239,18 @@ class DeployT5Attention(T5Attention):
             if layer_head_mask is not None:
                 attn_weights = attn_weights * layer_head_mask
 
-            attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
+            attn_output = torch.einsum("bhij,bhjd->bhid", attn_weights, value_states)
+            attn_output = rearrange(attn_output, 'b h s d -> b s (h d)', h=self.n_heads, d=self.key_value_proj_dim)
             attn_output = self.o(attn_output)
         
         if self.config.use_synchronize: torch.cuda.synchronize()
         if self.is_decoder: self.attn_ffn_time = (datetime.datetime.now() - start)
+
+        ####### Prepare outputs including the present key-value states if caching is enabled #######
         present_key_value_state = [key_states, value_states] if (self.is_decoder and use_cache) else None
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
+        ####### Include attention weights in output if requested #######
         if output_attentions:
             outputs = outputs + (attn_weights,)
             
@@ -946,18 +965,13 @@ class DeployT5Stack(T5Stack):
 
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
-                        print("lm_logits difference:\n")
                         ## comparing them only when we are exiting. 
                         mid_index = len(previous_logits) // 2
                         last_index = len(previous_logits) - 1
                         if len(previous_logits) % 2 == 0:  # if the array length is even
-                            print(previous_logits[last_index] - previous_logits[mid_index])
                             lm_logits = previous_logits[last_index] - previous_logits[mid_index]
                         else:  # if the array length is odd
-                            print(previous_logits[last_index] - previous_logits[mid_index])
                             lm_logits = previous_logits[last_index] - previous_logits[mid_index]
-                        
-                        print("performed logits difference\n")
                         
                         skip_mask = get_skip_mask(
                             lm_logits,
