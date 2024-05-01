@@ -946,18 +946,18 @@ class DeployT5Stack(T5Stack):
 
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
-                        print("lm_logits difference:\n")
-                        ## comparing them only when we are exiting. 
-                        mid_index = len(previous_logits) // 2
-                        last_index = len(previous_logits) - 1
-                        if len(previous_logits) % 2 == 0:  # if the array length is even
-                            print(previous_logits[last_index] - previous_logits[mid_index])
-                            lm_logits = previous_logits[last_index] - previous_logits[mid_index]
-                        else:  # if the array length is odd
-                            print(previous_logits[last_index] - previous_logits[mid_index])
-                            lm_logits = previous_logits[last_index] - previous_logits[mid_index]
+                        # print("lm_logits difference:\n")
+                        # ## comparing them only when we are exiting. 
+                        # mid_index = len(previous_logits) // 2
+                        # last_index = len(previous_logits) - 1
+                        # if len(previous_logits) % 2 == 0:  # if the array length is even
+                        #     print(previous_logits[last_index] - previous_logits[mid_index])
+                        #     lm_logits = previous_logits[last_index] - previous_logits[mid_index]
+                        # else:  # if the array length is odd
+                        #     print(previous_logits[last_index] - previous_logits[mid_index])
+                        #     lm_logits = previous_logits[last_index] - previous_logits[mid_index]
                         
-                        print("performed logits difference\n")
+                        # print("performed logits difference\n")
                         
                         skip_mask = get_skip_mask(
                             lm_logits,
@@ -1027,6 +1027,30 @@ class DeployT5Stack(T5Stack):
             if self.config.use_synchronize: torch.cuda.synchronize()
             if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
         
+        
+        print("*"*100)
+        # topk, indices from the last logits tensor
+        topk, indices = torch.topk(previous_logits[-1], 1)
+
+        # Initialize a list to store ranks at each layer
+        ranks_at_layers = []
+
+        # Loop over previous layers in reverse order, stopping at the first layer
+        for i in range(len(previous_logits) - 2, -1, -1):
+            # Get the sorted indices for this layer's logits
+            sorted_indices = torch.argsort(previous_logits[i], descending=True)
+
+            # Find the rank of the indices obtained from the last layer in the current layer's sorted list
+            # We do this by looking for the position of each top index in the sorted indices list
+            ranks = (sorted_indices == indices).nonzero(as_tuple=True)[1]
+            
+            # Store the rank positions
+            ranks_at_layers.append(ranks)
+
+            print(f"Layer {i} logits shape: {previous_logits[i].shape}")
+            print(f"Rank of indices in layer {i}: {ranks}")
+                
+        print("*"*100)
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
         if not skip_mask and self.lm_logits is None: # If threshold is "not satisfied", then compute the new block logits
