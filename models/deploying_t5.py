@@ -366,6 +366,13 @@ class DeployT5Block(T5Block):
             self.layer.append(DeployT5LayerCrossAttention(config))
 
         self.layer.append(T5LayerFF(config))
+    
+    def get_shallow_logits(self, hidden_states):
+        # Assuming self.layer[0] is the self-attention layer
+        shallow_hidden_states = self.layer[0].layer_norm(hidden_states)
+        shallow_hidden_states = self.dropout(shallow_hidden_states)
+        shallow_logits = self.lm_head(shallow_hidden_states)
+        return shallow_logits
 
     def gen_cross_attn_key_value(
         self,
@@ -605,6 +612,7 @@ class DeployT5Stack(T5Stack):
             self.stack_hidden_states = torch.cat(self.stack_hidden_states, dim=1)
             extended_attention_mask = attention_mask
 
+        previous_hidden_states = []
         for j in range(layer_idx, len(self.block)):
         
             past_key_value = past_key_values[j]
@@ -651,7 +659,7 @@ class DeployT5Stack(T5Stack):
             if self.config.use_synchronize: torch.cuda.synchronize()
             self.deploy_time['time_others'] += (datetime.datetime.now() - start)
 
-            layer_outputs = self.block[j](
+            layer_outputs = self.block[j]( #### Block forward pass, should be outputting the logits indeed no?
                 hidden_states,
                 attention_mask=extended_attention_mask,
                 position_bias=position_bias,
@@ -667,6 +675,9 @@ class DeployT5Stack(T5Stack):
                 parallel_mask=True,
                 stack_hidden_states=self.stack_hidden_states if self.config.copy_skipped_hidden_states else None,
             )
+
+            
+
             for idx, t in enumerate(self.block[j].key_value_gen_time): self.deploy_time['time_parallel_key_value_gen'][idx] += t
             for idx, t in enumerate(self.block[j].attn_time): self.deploy_time['time_parallel_attn'][idx] += t
             self.deploy_time['time_parallel_ffn'] += self.block[j].ffn_time
@@ -679,6 +690,20 @@ class DeployT5Stack(T5Stack):
                 layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
 
             hidden_states, present_key_value_state = layer_outputs[:2]
+
+            ## saving hidden states to compare them
+            # previous_hidden_states.append(hidden_states)
+
+            # ## comparing them only when we are exiting. 
+            # mid_index = len(previous_hidden_states) // 2
+            # last_index = len(previous_hidden_states) - 1
+            # if len(previous_hidden_states) % 2 == 0:  # if the array length is even
+            #     hidden_states = previous_hidden_states[last_index] - previous_hidden_states[mid_index]
+            # else:  # if the array length is odd
+            #     hidden_states = previous_hidden_states[last_index] - previous_hidden_states[mid_index]
+            
+            
+
 
             # We share the position biases between the layers - the first layer store them
             # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
@@ -817,6 +842,7 @@ class DeployT5Stack(T5Stack):
         self.shallow2deep = False  # False: skip, and True: forward
         self.lm_logits = None  # to prevent calculating logits twice
 
+        previous_logits = []
         for i, layer_module in enumerate(self.block):
                 
             # Static framework
@@ -917,7 +943,22 @@ class DeployT5Stack(T5Stack):
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
                         lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
                             else lm_head(_hidden_states * (self.config.d_model ** -0.5))
-                            
+
+                        ## then teh logit comparison needs to be done here
+                        previous_logits.append(lm_logits)
+                        print("lm_logits difference:\n")
+                        ## comparing them only when we are exiting. 
+                        mid_index = len(previous_logits) // 2
+                        last_index = len(previous_logits) - 1
+                        if len(previous_logits) % 2 == 0:  # if the array length is even
+                            print(previous_logits[last_index] - previous_logits[mid_index])
+                            lm_logits = previous_logits[last_index] - previous_logits[mid_index]
+                        else:  # if the array length is odd
+                            print(previous_logits[last_index] - previous_logits[mid_index])
+                            lm_logits = previous_logits[last_index] - previous_logits[mid_index]
+                        
+                        print("performed logits difference\n")
+                        
                         skip_mask = get_skip_mask(
                             lm_logits,
                             _hidden_states,
@@ -925,8 +966,10 @@ class DeployT5Stack(T5Stack):
                             config=self.config,
                             pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
                         )
+                        
                         if not skip_mask: self.block_op[i] += 1                    
-                        if skip_mask: self.lm_logits = lm_logits
+                        if skip_mask: self.lm_logits = lm_logits # I would assume this is where the logits get checked for whether they satisfy the threshold
+
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
                     
@@ -949,6 +992,10 @@ class DeployT5Stack(T5Stack):
                 output_attentions=output_attentions,
                 skip_mask=skip_mask,
             )
+
+            # logits are in layer_outputs
+
+            # save them and compute new logits!
 
             if self.is_decoder:
                 if self.config.use_early_exit: prefix = 'time_exit_' if skip_mask else 'time_'
@@ -982,7 +1029,7 @@ class DeployT5Stack(T5Stack):
         
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
-        if not skip_mask and self.lm_logits is None:
+        if not skip_mask and self.lm_logits is None: # If threshold is "not satisfied", then compute the new block logits
             hidden_states = self.final_layer_norm(hidden_states)
             hidden_states = self.dropout(hidden_states)
         if self.config.use_synchronize: torch.cuda.synchronize()
