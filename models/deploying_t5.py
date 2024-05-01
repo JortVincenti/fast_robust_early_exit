@@ -3,21 +3,15 @@ T5: https://github.com/huggingface/transformers/blob/main/src/transformers/model
 """
 from typing import Optional, Tuple, Union, List, Callable
 
-import os
 import copy
-import math
-import time
 import datetime
 import warnings
 import numpy as np
 import torch
 from einops import rearrange
-# torch.set_num_threads(4)
-# torch.set_num_interop_threads(4)
 import torch.distributed as dist
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from transformers.modeling_outputs import (
