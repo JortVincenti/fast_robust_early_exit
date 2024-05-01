@@ -45,7 +45,7 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     --max_seq_length 512 \
     --use_early_exit True \
     --exit_conf_type softmax \
-    --exit_conf_threshold 0.6 \
+    --exit_conf_threshold 0.4 \
     --exit_min_layer 2 \
     --max_eval_samples 100 \
     --include_inputs_for_metrics False \
