@@ -372,21 +372,30 @@ class DeployT5Block(T5Block):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
         self.config = config
-        self.is_decoder = config.is_decoder
+        self.is_decoder = config.is_decoder  # Flag to check if this block is part of the decoder
+
+        # Initialize layers in the block
         self.layer = nn.ModuleList()
         self.layer.append(DeployT5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias))
+        
+        ######## decoder ########
         if self.is_decoder:
+            # Add cross-attention layer only if it's a decoder
             self.layer.append(DeployT5LayerCrossAttention(config))
 
+        ######## common ########
+        # Always add the feed-forward layer
         self.layer.append(T5LayerFF(config))
     
+    ######## decoder ########
     def get_shallow_logits(self, hidden_states):
-        # Assuming self.layer[0] is the self-attention layer
+        # Generate logits from shallow hidden states (typically used in fast decoding)
         shallow_hidden_states = self.layer[0].layer_norm(hidden_states)
         shallow_hidden_states = self.dropout(shallow_hidden_states)
         shallow_logits = self.lm_head(shallow_hidden_states)
         return shallow_logits
-
+    
+    ######## decoder ########
     def gen_cross_attn_key_value(
         self,
         hidden_states,
@@ -444,7 +453,10 @@ class DeployT5Block(T5Block):
         parallel_mask=False,
         stack_hidden_states=None,
     ):
-    
+        # Process input through the block, handling both self-attention and cross-attention if applicable
+
+        ######## common ########
+        # Handling past key values for caching and faster processing
         if past_key_value is not None:
             if not self.is_decoder:
                 logger.warning("`past_key_values` is passed to the encoder. Please make sure this is intended.")
@@ -462,6 +474,8 @@ class DeployT5Block(T5Block):
         else:
             self_attn_past_key_value, cross_attn_past_key_value = None, None
 
+        ######## common ########
+        # Process self-attention
         self_attention_outputs = self.layer[0](
             hidden_states,
             attention_mask=attention_mask,
