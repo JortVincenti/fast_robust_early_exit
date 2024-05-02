@@ -975,7 +975,6 @@ class DeployT5Stack(T5Stack):
 
                         if self.config.exit_conf_type == "contrastive_decoding":
                             
-
                             skip_mask = get_skip_mask_cd(
                                 lm_logits,
                                 _hidden_states,
