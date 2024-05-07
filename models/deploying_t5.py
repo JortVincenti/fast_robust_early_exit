@@ -1070,7 +1070,7 @@ class DeployT5Stack(T5Stack):
                             maximum_k_size = 200 # where 200 is the maximum number of weights to keep ( it actually immediately decreases so it is lower thatn this)
                             minimum_k_size = 20 # where 20 is the minimum number of weights to keep
 
-                            current_k = func_inverse(i,maximum_k_size, minimum_k_size, 12) # we have 12 blocks right?
+                            current_k = func_inverse(i,maximum_k_size, minimum_k_size, 12) # we have 12 blocks right? I guess
 
                             _, self.top_k_indices = self.torch.topk(lm_logits, current_k, largest=True, sorted=True)
 
