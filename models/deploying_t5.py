@@ -1057,6 +1057,19 @@ class DeployT5Stack(T5Stack):
                             return max(k2, int(k1 / (1 + (k1 - k2) / k2 * i / num_layers)))
                         # this is the function for doing smoothed pruning
 
+                        def func_logarithmic_progression(i, k1, k2, num_layers):
+                            if i == 0:
+                                return k1
+                            scale = (k1 - k2) / (math.log(num_layers) + 1)  # Normalizing factor
+                            return max(k2, int(k1 - scale * math.log(i + 1)))
+                            
+                        def func_sigmoid_progression(i, k1, k2, num_layers):
+                            midpoint = num_layers / 2
+                            steepness = 10 / num_layers  # Adjust steepness as needed
+                            sigmoid = 1 / (1 + math.exp(-steepness * (i - midpoint)))
+                            return max(k2, int(k1 + (k2 - k1) * sigmoid))
+
+
                          if i == 1: # if it is the first layer
                             lm_logits = lm_head(_hidden_states)
                             # Get the top 2000 logits at block 1.
