@@ -28,17 +28,8 @@ import nltk
 import numpy as np
 from copy import deepcopy
 
-# # Populate the density array
-# import time
-
-# import numpy as np
-# from numpy.polynomial import polynomial
-# import pandas as pd
-
-# import matplotlib.pyplot as plt
-# import datashader as ds
-# import datashader.transfer_functions as tf
-
+import seaborn as sns
+import pandas as pd
 
 import datasets
 import evaluate
@@ -643,82 +634,51 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # Convert the list of arrays into a single NumPy array
         padded_array = np.array(padded_data)
 
+        # Converting the array to a DataFrame for easier handling in seaborn
+        df = pd.DataFrame(padded_array)
+
+        # Creating a boxplot
+        plt.figure(figsize=(12, 8))
+        sns.boxplot(data=df)
+        plt.title('Boxplot for Each Block')
+        plt.xlabel('Block')
+        plt.ylabel('Top-K value')
+        plt.grid(True)
+        plt.savefig("boxplot_topk_rank_eval.png")
+
         # Compute the mean of the first column
-        first_column_mean = np.nanmean(padded_array[:, 0])  # Use nanmean to ignore NaNs
+        mean_block = np.nanmean(padded_array, axis=0)
+        min_block = np.nanmin(padded_array, axis=0)
+        max_block = np.nanmax(padded_array, axis=0)
 
-        print("Mean of the first column:", first_column_mean)
-        # Plotting each array
+        # Plotting
+        blocks = np.arange(mean_block.size)
+
         plt.figure(figsize=(10, 6))
-        for idx, arr in enumerate(padded_data):
-            plt.plot(arr, label=f'Line {idx + 1}', color='blue', alpha=0.2)  # Set color and transparency
+        plt.plot(blocks, mean_block, label='Mean Top-K rank', color='midnightblue')
+        plt.fill_between(blocks, min_block, max_block, color='lightblue', alpha=0.5, label='Min/Max Range')
+        plt.title('Mean, Max and Min top-k rank over blocks')
+        plt.xlabel('Blocks')
+        plt.ylabel('Top-K rank')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("mean_topk_rank_eval.png")
 
+
+        # This is to plot all the lines, but it is not recommended for large datasets
+        # Plotting each array
+        # plt.figure(figsize=(10, 6))
+        # for idx, arr in enumerate(padded_data):
+        #     plt.plot(arr, label=f'Line {idx + 1}', color='blue', alpha=0.2)  # Set color and transparency
 
         # Add legend, labels, and title
-        plt.xlabel("Block Number")
-        plt.ylabel("Ranking Value")
-        plt.title("Top K List Ranking Values")
-        plt.grid(True)
+        # plt.xlabel("Block Number")
+        # plt.ylabel("Ranking Value")
+        # plt.title("Top K List Ranking Values")
+        # plt.grid(True)
 
-        # Show the plot
-        plt.savefig("top_k_list.png")
-
-        #https://stackoverflow.com/questions/47175398/line-based-heatmap-or-2d-line-histogram
-        # Determine the maximum length of the arrays to set the x-axis
-        # Calculate the maximum length of the sublists
-
-        # Each column is one data sample
-        # df = data
-
-        # # Following will append a nan-row and reshape the dataframe into two columns, with each sample stacked on top of each other
-        # #   THIS IS CRUCIAL TO OPTIMIZE SPEED: https://github.com/bokeh/datashader/issues/286
-
-        # # Append row with nan-values
-        # df = df.append(pd.DataFrame([np.array([np.nan] * len(df.columns))], columns=df.columns, index=[np.nan]))
-
-        # # Reshape
-        # x, y = df.shape
-        # arr = df.as_matrix().reshape((x * y, 1), order='F')
-        # df_reshaped = pd.DataFrame(arr, columns=list('y'), index=np.tile(df.index.values, y))
-        # df_reshaped = df_reshaped.reset_index()
-        # df_reshaped.columns.values[0] = 'x'
-
-        # # Plotting parameters
-        # x_range = (min(df.index.values), max(df.index.values))
-        # y_range = (df.min().min(), df.max().max())
-        # w = 1000
-        # h = 750
-        # dpi = 150
-        # cvs = ds.Canvas(x_range=x_range, y_range=y_range, plot_height=h, plot_width=w)
-
-        # # Aggregate data
-        # t0 = time.time()
-        # aggs = cvs.line(df_reshaped, 'x', 'y', ds.count())
-
-
-        # # One colored plot
-        # t1 = time.time()
-        # stacked_img = tf.Image(tf.shade(aggs, cmap=["darkblue", "darkblue"]))
-        # print("Time to create stacked image: {}".format(time.time() - t1))
-
-        # # Save
-        # f0 = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
-        # ax0 = f0.add_subplot(111)
-        # ax0.imshow(stacked_img.to_pil())
-        # ax0.grid(False)
-        # f0.savefig("stacked.png", bbox_inches="tight", dpi=dpi)
-
-        # # Heat map - This uses a equalized histogram (built-in default), there are other options, though.
-        # t2 = time.time()
-        # heatmap_img = tf.Image(tf.shade(aggs, cmap=plt.cm.Spectral_r))
-        # print("Time to create stacked image: {}".format(time.time() - t2))
-
-        # # Save
-        # f1 = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
-        # ax1 = f1.add_subplot(111)
-        # ax1.imshow(heatmap_img.to_pil())
-        # ax1.grid(False)
-        # f1.savefig("heatmap.png", bbox_inches="tight", dpi=dpi)
-
+        # # Show the plot
+        # plt.savefig("top_k_list.png")
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
