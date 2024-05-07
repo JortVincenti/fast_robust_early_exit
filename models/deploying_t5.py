@@ -2,7 +2,7 @@
 T5: https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L19
 """
 from typing import Optional, Tuple, Union, List, Callable
-
+import time
 import copy
 import datetime
 import warnings
@@ -970,27 +970,67 @@ class DeployT5Stack(T5Stack):
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         start = datetime.datetime.now() 
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
-
                         _hidden_states = _hidden_states * (self.config.d_model ** -0.5) if self.config.tie_word_embeddings else _hidden_states
 
                         # SHRINKING VOCAB PART: Get the top-200 logits at block 1. ==========================================
 
                         if i == 1: # if it is the first layer
                             lm_logits = lm_head(_hidden_states)
-                            # Get the top 200 logits at block 1.
-                            k = 200 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
+                            # Get the top 2000 logits at block 1.
+                            k = 2000 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
                             _, self.top_k_indices = torch.topk(lm_logits, k, largest=True, sorted=True)
                             self.top_k_indices = self.top_k_indices.flatten() # TO DO: Right now this is with one batch so this is allowed we need to check how this work with multiple batches etc.
                             # print("top_k_indices at block 1 is", self.top_k_indices.shape)
-
+                            selected_weights = lm_head.weight[self.top_k_indices, :] # THis can be done here to win some compute time
                         else: # For all the other layers
-                            selected_weights = lm_head.weight[self.top_k_indices, :]  # adjust dimensions
                             # Note: There is no bias in self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-                            lm_logits = torch.matmul(_hidden_states, selected_weights.t()) # Get new logits with the top-200 weights
+                            lm_logits = torch.nn.functional.linear(_hidden_states, selected_weights) # Get new logits with the top-200 weights
+                            # Note: Using nn.functional.linear should always outperform the lm_head(_hidden_states) as it uses the same function but with the whole data.
                             
+                        
+                        if i == 2: # Sanity check
+                            # With prunning
+                            start1 = time.perf_counter()
+                            lm_logits_prunned = torch.nn.functional.linear(_hidden_states, selected_weights)
+                            end1 = time.perf_counter()
+                            timetaken1 = end1 - start1
+
+                            # WITHOUT PRUNNING
+                            start2 = time.perf_counter()
+                            lm_logits_not_pruned = lm_head(_hidden_states)
+                            lm_logits_not_pruned = lm_logits_not_pruned[:, :, self.top_k_indices]
+                            end2 = time.perf_counter()
+                            timetaken2 = end2 - start2
+
+
+                            # Convert PyTorch tensors to NumPy arrays
+                            pruned_np = lm_logits_prunned.cpu().detach().numpy()
+                            not_pruned_np = lm_logits_not_pruned.cpu().detach().numpy()
+
+                            # Check if the arrays are close
+                            if not np.allclose(pruned_np, not_pruned_np, atol=1e-5): # TO DO: Figure out why when removing atol here you get different logits in some cases. 
+                                # Find where they are not close
+                                diff_mask = np.isclose(pruned_np, not_pruned_np) == False
+                                differing_indices = np.where(diff_mask)
+                                # Extract the differing values
+                                differing_values_pruned = pruned_np[diff_mask]
+                                differing_values_not_pruned = not_pruned_np[diff_mask]
+                                
+                                # Print the differing values and their indices
+                                print("Differing indices:", differing_indices)
+                                print("Values in pruned logits at differing indices:", differing_values_pruned)
+                                print("Values in not pruned logits at differing indices:", differing_values_not_pruned)
+                                
+                                # Optionally, raise an exception or handle the discrepancy as needed
+                                raise ValueError("The pruned logits are not the same as the non-pruned logits. Differences found at indices.")
+
+
+                            #assert np.allclose(lm_logits_prunned.cpu().detach().numpy(), lm_logits_not_pruned.cpu().detach().numpy()), "The prunned logits are not the same as the non-prunned logits" + str(lm_logits_prunned) + str(lm_logits_not_pruned)
+                            assert timetaken1 < timetaken2, "The prunned logits are taking longer to compute than the non-prunned logits " + str(timetaken1) + " " + str(timetaken2)
+
                         # ====================================================================================================
 
-                        print("Logits at block", i, "with shape", lm_logits.shape)
+                        #print("Logits at block", i, "with shape", lm_logits.shape)
 
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
