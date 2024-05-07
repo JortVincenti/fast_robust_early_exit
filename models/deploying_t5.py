@@ -1049,16 +1049,11 @@ class DeployT5Stack(T5Stack):
             
             if self.config.use_synchronize: torch.cuda.synchronize()
             if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-        
-
-        #print("*"*100)
-        # topk, indices from the last logits tensor
-        
+                
         if len(previous_logits) > 0:
-            #print(len(previous_logits))
-            #print("Previous logits", torch.topk(previous_logits[-1], 1))
+            # Get the top-1 index of last block.
             index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
-            #print("last fist index", index_top_1)
+
             # Initialize a list to store ranks at each layer
             ranks_at_layers = []
 
@@ -1067,21 +1062,16 @@ class DeployT5Stack(T5Stack):
                 # Get the sorted indices for this layer's logits
                 sorted_indices = torch.argsort(previous_logits[i], descending=True)
 
-                # Find the rank of the indices obtained from the last layer in the current layer's sorted list
-                # We do this by looking for the position of each top index in the sorted indices list
+                # Find the rank of the top-1 index of the last block in the sorted indices of block i
                 rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
 
-                
                 # Store the rank positions
                 ranks_at_layers.append(rank[0])
 
-                #print(f"Layer {i} logits shape: {previous_logits[i].shape}")
-                #print(f"Rank of indices in layer {i}: {rank}")
-            ranks_at_layers.reverse()
-            ranks_at_layers.append(0)
-            #print("Full layers", ranks_at_layers, len(ranks_at_layers))
-            self.graph_top_k_list.append(ranks_at_layers)
-        #print("*"*100)
+            ranks_at_layers.reverse() # Reverse the list to have the ranks in the correct order
+            ranks_at_layers.append(0) # Append 0 to the end of the list to represent the rank at the last layer
+
+            self.graph_top_k_list.append(ranks_at_layers) # Append the ranks at each layer to the list of ranks
 
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
