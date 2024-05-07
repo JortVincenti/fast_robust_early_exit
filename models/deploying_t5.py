@@ -547,6 +547,7 @@ class DeployT5Stack(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
         self.graph_top_k_list = []
+        self.top_k_indices = None
         
         self.embed_tokens = embed_tokens
         self.is_decoder = config.is_decoder
@@ -882,7 +883,7 @@ class DeployT5Stack(T5Stack):
             
             # check that tokens are generated once in a time
             auto_reg = True if hidden_states.shape[1] == 1 else False
-            if self.is_decoder and auto_reg and i == 0: self.block_op[i] += 1
+            if self.is_decoder and auto_reg and i == 0: self.block_op[i] += 1 # TO DO: Maybe implement the top_k here?
                             
             if self.is_decoder and auto_reg and i > 0:
                 
@@ -967,10 +968,29 @@ class DeployT5Stack(T5Stack):
                         self.block_op[i] += 1
                     else:
                         if self.config.use_synchronize: torch.cuda.synchronize()
-                        start = datetime.datetime.now()
+                        start = datetime.datetime.now() 
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
-                        lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
-                            else lm_head(_hidden_states * (self.config.d_model ** -0.5))
+
+                        _hidden_states = _hidden_states * (self.config.d_model ** -0.5) if self.config.tie_word_embeddings else _hidden_states
+
+                        # SHRINKING VOCAB PART: Get the top-200 logits at block 1. ==========================================
+
+                        if i == 1: # if it is the first layer
+                            lm_logits = lm_head(_hidden_states)
+                            # Get the top 200 logits at block 1.
+                            k = 200 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
+                            _, self.top_k_indices = torch.topk(lm_logits, k, largest=True, sorted=True)
+                            self.top_k_indices = self.top_k_indices.flatten() # TO DO: Right now this is with one batch so this is allowed we need to check how this work with multiple batches etc.
+                            # print("top_k_indices at block 1 is", self.top_k_indices.shape)
+
+                        else: # For all the other layers
+                            selected_weights = lm_head.weight[self.top_k_indices, :]  # adjust dimensions
+                            # Note: There is no bias in self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+                            lm_logits = torch.matmul(_hidden_states, selected_weights.t()) # Get new logits with the top-200 weights
+                            
+                        # ====================================================================================================
+
+                        print("Logits at block", i, "with shape", lm_logits.shape)
 
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
@@ -995,6 +1015,8 @@ class DeployT5Stack(T5Stack):
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
+
+
                     
                 # Normal framework
                 elif (not self.use_shallow_deep and not self.use_early_exit):
