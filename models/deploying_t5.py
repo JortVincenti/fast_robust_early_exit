@@ -1027,9 +1027,61 @@ class DeployT5Stack(T5Stack):
 
                             #assert np.allclose(lm_logits_prunned.cpu().detach().numpy(), lm_logits_not_pruned.cpu().detach().numpy()), "The prunned logits are not the same as the non-prunned logits" + str(lm_logits_prunned) + str(lm_logits_not_pruned)
                             assert timetaken1 < timetaken2, "The prunned logits are taking longer to compute than the non-prunned logits " + str(timetaken1) + " " + str(timetaken2)
+                        
+                        # FIRST DIFFERENT BATCH SIZE 
+                        '''''
+                        if i == 1:  # if it is the first layer
+                            lm_logits = self.lm_head(hidden_states)
+                            k = 200  
+                            _, top_k_indices = torch.topk(lm_logits, k, dim=-1, largest=True, sorted=True)
+
+                            b_size = hidden_states.size(0)
+                            top_k_indices = top_k_indices.view(b_size, -1) 
+                            
+                            selected_weights = torch.gather(self.lm_head.weight.expand(b_size, -1, -1), 
+                                                            1, top_k_indices.unsqueeze(-1).expand(-1, -1, self.lm_head.weight.size(1)))
+                            
+                            self.selected_weights = selected_weights
+
+                        else:  # For all the other layers
+                            # Use the selected_weights stored from the first layer
+                            # Assuming hidden_states are [batch_size, seq_length, d_model]
+                            # and selected_weights are [batch_size, top_k, d_model]
+                            lm_logits = torch.bmm(hidden_states, self.selected_weights.transpose(1, 2))
+        
+                        '''''
+
+                        # Smoothed pruning! 
+                        '''''
+                        def func_inverse(i, k1, k2, num_layers):
+                            return max(k2, int(k1 / (1 + (k1 - k2) / k2 * i / num_layers)))
+                        # this is the function for doing smoothed pruning
+
+                         if i == 1: # if it is the first layer
+                            lm_logits = lm_head(_hidden_states)
+                            # Get the top 2000 logits at block 1.
+                            k = 200 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
+                            _, self.top_k_indices = torch.topk(lm_logits, k, largest=True, sorted=True)
+                            self.top_k_indices = self.top_k_indices.flatten() # TO DO: Right now this is with one batch so this is allowed we need to check how this work with multiple batches etc.
+                            # print("top_k_indices at block 1 is", self.top_k_indices.shape)
+                            selected_weights = lm_head.weight[self.top_k_indices, :] # THis can be done here to win some compute time
+                        else: # For all the other layers -> smoothed pruning
+                        
+                            maximum_k_size = 200 # where 200 is the maximum number of weights to keep ( it actually immediately decreases so it is lower thatn this)
+                            minimum_k_size = 20 # where 20 is the minimum number of weights to keep
+
+                            current_k = func_inverse(i,maximum_k_size, minimum_k_size, 12) # we have 12 blocks right?
+
+                            _, self.top_k_indices = self.torch.topk(lm_logits, current_k, largest=True, sorted=True)
+
+                            selected_weights = lm_head.weight[self.top_k_indices, :]
+
+                            # Use these selected weights to compute the logits for this layer.
+                            hidden_states = torch.nn.functional.linear(hidden_states, selected_weights)
+                        '''''
 
                         # ====================================================================================================
-
+        
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
                         ## comparing them only when we are exiting. 
