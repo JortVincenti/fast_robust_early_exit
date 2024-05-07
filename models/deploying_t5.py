@@ -977,7 +977,7 @@ class DeployT5Stack(T5Stack):
                         if i == 1: # if it is the first layer
                             lm_logits = lm_head(_hidden_states)
                             # Get the top 2000 logits at block 1.
-                            k = 2000 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
+                            k = 200 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
                             _, self.top_k_indices = torch.topk(lm_logits, k, largest=True, sorted=True)
                             self.top_k_indices = self.top_k_indices.flatten() # TO DO: Right now this is with one batch so this is allowed we need to check how this work with multiple batches etc.
                             # print("top_k_indices at block 1 is", self.top_k_indices.shape)
@@ -1029,8 +1029,6 @@ class DeployT5Stack(T5Stack):
                             assert timetaken1 < timetaken2, "The prunned logits are taking longer to compute than the non-prunned logits " + str(timetaken1) + " " + str(timetaken2)
 
                         # ====================================================================================================
-
-                        #print("Logits at block", i, "with shape", lm_logits.shape)
 
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
