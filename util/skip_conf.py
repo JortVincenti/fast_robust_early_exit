@@ -1,16 +1,69 @@
 import numpy as np
 import torch
+import torch.nn as nn 
 
 from transformers import AutoConfig
 from copy import deepcopy
 import datetime
 
+class JSD(nn.Module):
+    def __init__(self):
+        super(JSD, self).__init__()
+        self.kl = nn.KLDivLoss(reduction='batchmean', log_target=True)
 
+    def forward(self, p: torch.tensor, q: torch.tensor):
+        p, q = p.view(-1, p.size(-1)), q.view(-1, q.size(-1))
+        m = (0.5 * (p + q)).log()
+        return 0.5 * (self.kl(m, p.log()) + self.kl(m, q.log()))
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_probits(probits, title='Probability Distribution Over Large Vocabulary', layer_exp=None, layer_am=None):
+    """
+    Plot the probability distribution for a large vocabulary indexed from 0 to len(probits)-1.
+
+    Parameters:
+        probits (list or np.array): The probabilities of the vocabulary terms.
+        title (str): Title of the plot.
+
+    Returns:
+        None. Displays the plot.
+    """
+
+    probits = probits.cpu().detach().numpy()
+
+    # Setting the style and context for a publication-quality plot
+    sns.set(style="whitegrid", context="talk", palette="muted")
+
+    # Create a new figure and set its size for better readability in papers
+    plt.figure(figsize=(12, 6))
+
+    # Use numpy to create an array of indices for the x-axis
+    indices = np.arange(len(probits))
+
+    # Creating the line plot for large vocabulary
+    plt.plot(indices, probits, marker='', color='deepskyblue', linewidth=1.5)
+
+    # Adding title and labels with enhancements
+    plt.title(title, fontsize=18, fontweight='bold')
+    plt.xlabel('Vocabulary Index', fontsize=14)
+    plt.ylabel('Probability', fontsize=14)
+
+    # Limit the display of the x-axis for clarity
+    plt.xlim(0, len(probits))
+
+    # Tight layout often provides a cleaner look especially when saving figures
+    plt.tight_layout()
+
+    # Save the figure as a high-resolution PNG, which is often used in papers
+    plt.savefig(title, dpi=300)
+
+    # Show the plot
+    plt.show()
 
 def softmax_confidence(
     logits: torch.Tensor = None,
-    hidden_states: torch.Tensor = None,
-    classifier: torch.nn.Linear = None,
 ):  
     # start = datetime.datetime.now()
     assert logits is not None
@@ -23,7 +76,6 @@ def softmax_confidence(
 
 
 def meta_confidence(
-    logits: torch.Tensor = None,
     hidden_states: torch.Tensor = None,
     classifier: torch.nn.Linear = None,
 ):
@@ -41,8 +93,6 @@ def contrastive_confidence(
     prev_probits: dict = None, 
     layer_am: int = None,
     alpha: float = None,
-    hidden_states: torch.Tensor = None,
-    classifier: torch.nn.Linear = None,
 ):
     """
     Checking confidence with contrastive decoding.
@@ -73,11 +123,7 @@ def contrastive_confidence(
     s = deepcopy(probits_exp)
 
     mask = probits_exp >= alpha * max_probs_exp
-
-    
     s[mask] = torch.softmax(torch.log(probits_exp[mask]) - torch.log(probits_am[mask]), dim=-1) 
-
-    
     top_2 = torch.topk(s, dim=-1, k=2)[0]
     # end = datetime.datetime.now()
     # print("Time taken for contrastive confidence", end-start)
@@ -104,27 +150,61 @@ def reweight_contrastive_confidence(
 
 
     ## calculate current layer probabilities
-    probits_exp = torch.softmax(lm_logits, dim=-1)
-    probits_exp = torch.squeeze(probits_exp)
+    probits_exp = torch.softmax(lm_logits, dim=-1).squeeze_()
     prev_probits[layer_exp] = probits_exp
    
     # probs_exp = torch.softmax(logits_at, dim=-1)
     max_probs_exp = torch.max(probits_exp)
 
     ## obtaining the correct layer probit values from previous layers (the layer index is choosen to be usually half of the current layer). 
-    if layer_am in prev_probits.keys():
-        probits_am = prev_probits[layer_am]
-    else:
-        raise ValueError("Choosen layer has not been computed yet")
+    # if layer_am in prev_probits.keys():
+    #     probits_am = prev_probits[layer_am]
+    # else:
+    #     raise ValueError("Choosen layer has not been computed yet")
+
+
+    # Calculate Jensen-Shannon Divergence between the current and previous layer
+    # probs_am = torch.softmax(logits_am, dim=-1)
+    # probs_am = torch.squeeze(probs_am)
+    # probs_exp = torch.squeeze(probs_exp)
+    # m = 0.5 * (probs_am + probs_exp)
+    # jsd = 0.5 * (torch.sum(probs_am * torch.log(probs_am / m)) + torch.sum(probs_exp * torch.log(probs_exp / m)))
+
+    jsd = JSD()
+    #jsds = {k: jsd(probits_exp, v) for k, v in prev_probits.items()}
+
+    # only consider jsds between current and current // 2 layers
+    jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in [layer_exp, layer_exp // 2]}
+
+    # get the probits with the maximum jsd
+    max_jsd_layer = max(jsds, key=jsds.get)
+    probits_am = prev_probits[max_jsd_layer]
+
+    #print("Picking the layer with the maximum JSD", max_jsd_layer)
+
+    # for v in prev_probits.values():
+    #     probs_am = v
+    #     jsd_val = jsd(probits_exp, probs_am)
+    #     jsds.append(jsd_val)
+    
+    # max_jsd = torch.max(torch.stack(jsds))
+
     
     ## calculating the scores using the plausibility constraint
-    s = deepcopy(probits_exp)
+    # s = deepcopy(probits_exp)
 
+    s = torch.zeros_like(probits_exp)
     mask = probits_exp >= alpha * max_probs_exp
+    contrast = torch.log(probits_exp[mask]) - torch.log(probits_am[mask])
+    s.masked_fill_(mask, contrast[0])
+    # DoLA Implementation:
+    s.masked_fill_(~mask, -1e9)
+    s = torch.softmax(s, dim=-1).mul_(torch.sum(probits_exp))
 
+    #plot_probits(s, title='Reweighted Contrastive Confidence, layer_exp: {}, layer_am: {}'.format(layer_exp, max_jsd_layer))
 
-    s[mask] = torch.softmax(torch.log(probits_exp[mask]) - torch.log(probits_am[mask]), dim=-1) * torch.sum(probits_exp[mask])
-
+    # TODO: (joan) test also against the scaling being done within the softmax 
+    # TODO (joan): Assess JSD between distributions to see what is the best way to do this
 
     top_2 = torch.topk(s, dim=-1, k=2)[0]
     # end = datetime.datetime.now()
@@ -234,9 +314,7 @@ def get_skip_mask(
     conf_measure = get_confidence_class(key=key)    
     
     conf = conf_measure(
-        logits=logits, 
-        hidden_states=hidden_states, 
-        classifier=classifier,
+        logits=logits
         )
     
     mask = torch.where(conf <= threshold, 0., 1.).bool()

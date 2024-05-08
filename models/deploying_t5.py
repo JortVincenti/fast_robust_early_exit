@@ -13,6 +13,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
+from util.skip_conf import plot_probits
+from transformers import T5Tokenizer
 
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -27,7 +29,7 @@ from transformers.models.t5.modeling_t5 import (
     T5LayerFF,
     T5Block, 
     T5Stack, 
-    T5ForConditionalGeneration
+    T5ForConditionalGeneration, 
 )
 from transformers.models.t5.configuration_t5 import T5Config
 from transformers.generation.utils import GreedySearchDecoderOnlyOutput, GreedySearchEncoderDecoderOutput
@@ -576,6 +578,10 @@ class DeployT5Stack(T5Stack):
             self._reset_time_measure()
         else: self.deploy_time = None
         
+        plot = False
+        if plot:
+            self.tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-large")
+        
     def _reset_time_measure(self):
         self.deploy_time = {'time_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
                             'time_attn': [datetime.timedelta(), datetime.timedelta()],
@@ -1015,6 +1021,22 @@ class DeployT5Stack(T5Stack):
                         if not skip_mask: self.block_op[i] += 1                    
                         if skip_mask: 
                             self.lm_logits = lm_logits # This is where the logits are sent to do the predictions.
+                            plot = False
+
+                            if plot:
+                                # Plot the probits distribution
+                                probits = torch.softmax(lm_logits, dim=-1)
+                                argmax_index = torch.argmax(probits).item()
+                                # Tokenizer to get the words
+                                word = self.tokenizer.decode(argmax_index)
+
+                                print(probits.shape)
+                                print("Word: ", word) 
+                                print("Layer: ", i)
+
+                                plot_probits(probits.squeeze(), title="Probits Distribution, word : {} Layer: ".format(word) + str(i) ) if word != "</s>" else None
+
+
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)

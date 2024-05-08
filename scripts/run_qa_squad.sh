@@ -30,13 +30,13 @@
 
 
 CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
-    --model_name_or_path t5-large \
+    --model_name_or_path t5-3b \
     --do_eval \
     --dataset_name squad \
     --context_column context \
     --question_column question \
     --answer_column answers \
-    --output_dir ./save/squad_t5-large/ \
+    --output_dir ./save/squad_t5-3b/ \
     --per_device_eval_batch_size 1 \
     --deploy_scenario True \
     --use_synchronize False \
@@ -44,9 +44,9 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     --predict_with_generate \
     --max_seq_length 512 \
     --use_early_exit True \
-    --exit_conf_type softmax \
-    --exit_conf_threshold 0.4 \
-    --exit_min_layer 2 \
+    --exit_conf_type reweight_contrastive_decoding \
+    --exit_conf_threshold 0.9 \
+    --exit_min_layer 17 \
     --max_eval_samples 100 \
     --include_inputs_for_metrics False \
 

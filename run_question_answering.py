@@ -18,6 +18,9 @@ Fine-tuning the library's seq2seq models for question answering using the 🤗 S
 """
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
+
+TESTING = True
+
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -659,8 +662,6 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
 if __name__ == "__main__":
     os.environ["WANDB_DISABLED"] = "true"
-    
-    
 
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -690,7 +691,8 @@ if __name__ == "__main__":
                 "exit_conf_type": additional_args.exit_conf_type,
                 "exit_conf_threshold": additional_args.exit_conf_threshold,
                 "exit_min_layer": additional_args.exit_min_layer,
-                }
+                },
+            mode="disabled" if TESTING else "online",
             )
     
     main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)
