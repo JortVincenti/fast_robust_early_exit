@@ -7,6 +7,9 @@ class AdditionalArguments:
     """
     Arguments for accelerating decoder models.
     """
+    type_vocab_reduct: Optional[str] = field(
+        default=False, metadata={"help": ("Reduce the size of vocab. Either use fixed, decaying, adaptive, or None.")},
+    )
 
     # deployment scenario
     deploy_scenario: Optional[bool] = field(
@@ -146,6 +149,7 @@ def update_autoconfig(config, additional_args, **kwargs):
         'exit_min_layer': additional_args.exit_min_layer,
         'train_meta_cm_head': additional_args.train_meta_cm_head,
         'max_answer_length': kwargs.get('max_answer_length', None),
+        'type_vocab_reduct': kwargs.get('type_vocab_reduct', None),
     }
     config.update(early_exit_config)
     

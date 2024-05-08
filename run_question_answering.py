@@ -664,7 +664,6 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         plt.grid(True)
         plt.savefig("mean_topk_rank_eval.png")
 
-
         # This is to plot all the lines, but it is not recommended for large datasets
         # Plotting each array
         # plt.figure(figsize=(10, 6))
