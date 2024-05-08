@@ -969,13 +969,19 @@ class DeployT5Stack(T5Stack):
                         self.block_op[i] += 1
                     else:
                         if self.config.use_synchronize: torch.cuda.synchronize()
+                        
                         start = datetime.datetime.now() 
-                        _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
-                        _hidden_states = (_hidden_states * (self.config.d_model ** -0.5)) if self.config.tie_word_embeddings else _hidden_states
+                        # _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
+                        # _hidden_states = (_hidden_states * (self.config.d_model ** -0.5)) if self.config.tie_word_embeddings else _hidden_states
 
                         # SHRINKING VOCAB PART:
                         if not self.config.type_vocab_reduct: # If we are not using any vocab reduction
-                            lm_logits = lm_head(_hidden_states)
+                            #lm_logits = lm_head(_hidden_states)
+                            _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
+                            lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
+                                else lm_head(_hidden_states * (self.config.d_model ** -0.5))
+                            
+                            #lm_logits = lm_head(_hidden_states)
                         else: 
                             if i == 1: # if it is the first layer
                                 lm_logits = lm_head(_hidden_states)
@@ -1012,7 +1018,7 @@ class DeployT5Stack(T5Stack):
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
                         ## comparing them only when we are exiting. 
-
+                        #print(self.config)
                         skip_mask = get_skip_mask(
                             lm_logits,
                             _hidden_states,
@@ -1028,8 +1034,6 @@ class DeployT5Stack(T5Stack):
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
-
-
                     
                 # Normal framework
                 elif (not self.use_shallow_deep and not self.use_early_exit):
