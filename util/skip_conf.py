@@ -5,6 +5,7 @@ from transformers import AutoConfig
 from copy import deepcopy
 
 
+
 def softmax_confidence(
     logits: torch.Tensor = None,
     hidden_states: torch.Tensor = None,
@@ -68,9 +69,56 @@ def contrastive_confidence(
 
     mask = probits_exp >= alpha * max_probs_exp
 
-    s[mask] = torch.softmax(torch.log(probits_exp[mask]) - torch.log(probits_am[mask]), dim=-1)
     
+    s[mask] = torch.softmax(torch.log(probits_exp[mask]) - torch.log(probits_am[mask]), dim=-1) 
+
     
+    top_2 = torch.topk(s, dim=-1, k=2)[0]
+    
+    return (top_2[..., 0] - top_2[..., 1]).squeeze()
+
+def reweight_contrastive_confidence(  
+    lm_logits: torch.Tensor = None,
+    layer_exp: int = None, 
+    prev_probits: dict = None, 
+    layer_am: int = None,
+    alpha: float = None,
+    hidden_states: torch.Tensor = None,
+    classifier: torch.nn.Linear = None,
+):
+    """
+    Checking confidence with contrastive decoding.
+    First we are computing the V_head, meaning the plausibility constraint.
+    Second we are getting the probits from previous iterations and comparing with a fixed one by taking the log difference.
+    
+    """
+
+    assert lm_logits is not None
+
+
+    ## calculate current layer probabilities
+    probits_exp = torch.softmax(lm_logits, dim=-1)
+    probits_exp = torch.squeeze(probits_exp)
+    prev_probits[layer_exp] = probits_exp
+   
+    # probs_exp = torch.softmax(logits_at, dim=-1)
+    max_probs_exp = torch.max(probits_exp)
+
+    ## obtaining the correct layer probit values from previous layers (the layer index is choosen to be usually half of the current layer). 
+    if layer_am in prev_probits.keys():
+        probits_am = prev_probits[layer_am]
+    else:
+        raise ValueError("Choosen layer has not been computed yet")
+    
+    ## calculating the scores using the plausibility constraint
+    s = deepcopy(probits_exp)
+
+    mask = probits_exp >= alpha * max_probs_exp
+
+
+    s[mask] = torch.softmax(torch.log(probits_exp[mask]) - torch.log(probits_am[mask]), dim=-1) * torch.sum(probits_exp[mask])
+
+
     top_2 = torch.topk(s, dim=-1, k=2)[0]
     
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
@@ -81,7 +129,8 @@ def get_confidence_class(key):
     _conf_class_map = {
         'softmax': softmax_confidence,
         'meta': meta_confidence,
-        'contrastive_decoding': contrastive_confidence
+        'contrastive_decoding': contrastive_confidence,
+        'reweight_contrastive_decoding': reweight_contrastive_confidence,
     }
 
     if key in _conf_class_map:
