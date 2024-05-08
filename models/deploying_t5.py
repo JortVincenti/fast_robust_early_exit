@@ -971,7 +971,7 @@ class DeployT5Stack(T5Stack):
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         start = datetime.datetime.now() 
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
-                        _hidden_states = _hidden_states * (self.config.d_model ** -0.5) if self.config.tie_word_embeddings else _hidden_states
+                        _hidden_states = (_hidden_states * (self.config.d_model ** -0.5)) if self.config.tie_word_embeddings else _hidden_states
 
                         # SHRINKING VOCAB PART:
                         if not self.config.type_vocab_reduct: # If we are not using any vocab reduction
@@ -980,7 +980,7 @@ class DeployT5Stack(T5Stack):
                             if i == 1: # if it is the first layer
                                 lm_logits = lm_head(_hidden_states)
                                 # Get the top 2000 logits at block 1.
-                                k = 200 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
+                                k = 2500 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
                                 _, self.top_k_indices = torch.topk(lm_logits, k, largest=True, sorted=True)
                                 self.top_k_indices = self.top_k_indices.flatten() # TO DO: Right now this is with one batch so this is allowed we need to check how this work with multiple batches etc.
                                 # print("top_k_indices at block 1 is", self.top_k_indices.shape)
@@ -993,24 +993,22 @@ class DeployT5Stack(T5Stack):
                                 elif self.config.type_vocab_reduct == "decaying":  # Smoothed pruning! For all the other layers -> smoothed pruning
                                     def func_inverse(i, k1, k2, num_layers): # this is the function for doing smoothed pruning
                                         return max(k2, int(k1 / (1 + (k1 - k2) / k2 * i / num_layers)))
+                                    #maximum_k_size = 200 # where 200 is the maximum number of weights to keep ( it actually immediately decreases so it is lower thatn this)
+                                    #minimum_k_size = 20 # where 20 is the minimum number of weights to keep
+                                    #current_k = func_inverse(i,maximum_k_size, minimum_k_size, 12) # we have 12 blocks right? I guess
                                     
-                                    maximum_k_size = 200 # where 200 is the maximum number of weights to keep ( it actually immediately decreases so it is lower thatn this)
-                                    minimum_k_size = 20 # where 20 is the minimum number of weights to keep
-
-                                    current_k = func_inverse(i,maximum_k_size, minimum_k_size, 12) # we have 12 blocks right? I guess
-
-                                    selected_weights = lm_head.weight[self.top_k_indices[:current_k], :]
+                                    top_k_list = [4500, 2500, 2000, 1000, 750, 700, 600, 500, 400, 300, 100, 50] # This is the list of top_k values for each block based on graph.
+                                    selected_weights = lm_head.weight[self.top_k_indices[:top_k_list[i]], :]
 
                                     # Use these selected weights to compute the logits for this layer.
                                     lm_logits = torch.nn.functional.linear(hidden_states, selected_weights)
-                                
                                 elif self.config.type_vocab_reduct == "adaptive":
                                     raise("Not implemented yet")
                                 else: 
                                     raise("Please provide a valid type_vocab_reduct argument. Either use fixed, decaying, or adaptive.")
 
                         # ====================================================================================================
-        
+                        print("lm_logits shape is", lm_logits.shape, "for layer", i)
                         ## then teh logit comparison needs to be done here
                         previous_logits.append(lm_logits)
                         ## comparing them only when we are exiting. 
@@ -1022,6 +1020,8 @@ class DeployT5Stack(T5Stack):
                             config=self.config,
                             pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
                         )
+
+                        print("*"*100)
                         
                         if not skip_mask: self.block_op[i] += 1                    
                         if skip_mask: self.lm_logits = lm_logits # I would assume this is where the logits get checked for whether they satisfy the threshold

@@ -12,7 +12,6 @@ def softmax_confidence(
     assert logits is not None
     probs = torch.softmax(logits, dim=-1)
     top_2 = torch.topk(probs, dim=-1, k=2)[0]
-
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
 
 
@@ -75,10 +74,10 @@ def get_skip_mask(
     )
     mask = torch.where(conf <= threshold, 0., 1.).bool()
 
-    #print(f"Confidence: {conf.item():.4f}, Threshold: {threshold:.4f}, Mask: {mask.item()}")
+    print(f"Confidence: {conf.item():.4f}, Threshold: {threshold:.4f}, Mask: {mask.item()}")
     
-    # print("Are we early exiting?", mask.item() == 1)
-    # print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
+    print("Are we early exiting?", mask.item() == 1)
+    print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
 
 
     if not return_conf:
