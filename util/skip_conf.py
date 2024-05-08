@@ -3,6 +3,7 @@ import torch
 
 from transformers import AutoConfig
 from copy import deepcopy
+import datetime
 
 
 
@@ -10,10 +11,13 @@ def softmax_confidence(
     logits: torch.Tensor = None,
     hidden_states: torch.Tensor = None,
     classifier: torch.nn.Linear = None,
-):
+):  
+    # start = datetime.datetime.now()
     assert logits is not None
     probs = torch.softmax(logits, dim=-1)
     top_2 = torch.topk(probs, dim=-1, k=2)[0]
+    # end = datetime.datetime.now()
+    # print("Time taken for softmax confidence", end-start)
 
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
 
@@ -51,6 +55,7 @@ def contrastive_confidence(
 
 
     ## calculate current layer probabilities
+    # start = datetime.datetime.now()
     probits_exp = torch.softmax(lm_logits, dim=-1)
     probits_exp = torch.squeeze(probits_exp)
     prev_probits[layer_exp] = probits_exp
@@ -74,6 +79,8 @@ def contrastive_confidence(
 
     
     top_2 = torch.topk(s, dim=-1, k=2)[0]
+    # end = datetime.datetime.now()
+    # print("Time taken for contrastive confidence", end-start)
     
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
 
@@ -92,7 +99,7 @@ def reweight_contrastive_confidence(
     Second we are getting the probits from previous iterations and comparing with a fixed one by taking the log difference.
     
     """
-
+    # start = datetime.datetime.now()
     assert lm_logits is not None
 
 
@@ -120,6 +127,8 @@ def reweight_contrastive_confidence(
 
 
     top_2 = torch.topk(s, dim=-1, k=2)[0]
+    # end = datetime.datetime.now()
+    # print("Time taken for contrastive confidence", end-start)
     
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
 
@@ -186,8 +195,8 @@ def get_skip_mask_cd(
 
     mask = torch.where(conf <= threshold, 0., 1.).bool()
 
-    print("Are we early exiting?", mask.item() == 1)
-    print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
+    # print("Are we early exiting?", mask.item() == 1)
+    # print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
 
     # print("mask", mask)
     # print("mask shape", mask.shape)
@@ -232,8 +241,8 @@ def get_skip_mask(
     
     mask = torch.where(conf <= threshold, 0., 1.).bool()
 
-    print("Are we early exiting?", mask.item() == 1)
-    print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
+    # print("Are we early exiting?", mask.item() == 1)
+    # print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())
     
     
     if not return_conf:

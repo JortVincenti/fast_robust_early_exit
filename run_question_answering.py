@@ -613,10 +613,10 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # refer to https://discuss.huggingface.co/t/evaluation-results-metric-during-training-is-different-from-the-evaluation-results-at-the-end/15401/3
         metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
         # print("eval_runtime", metrics["eval_runtime"])
-        wandb.log({"eval_block_avg": metrics["eval_block_avg"]})
-        wandb.log({"eval_exact_match": metrics["eval_exact_match"]})
-        wandb.log({"eval_f1": metrics["eval_f1"]})
-        wandb.log({"eval_runtime": metrics["eval_runtime"]})
+        # wandb.log({"eval_block_avg": metrics["eval_block_avg"]})
+        # wandb.log({"eval_exact_match": metrics["eval_exact_match"]})
+        # wandb.log({"eval_f1": metrics["eval_f1"]})
+        # wandb.log({"eval_runtime": metrics["eval_runtime"]})
         # wandb.log({"eval_samples": metrics["eval_samples"]})
         
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)

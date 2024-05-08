@@ -952,7 +952,7 @@ class DeployT5Stack(T5Stack):
 
                 # Early-Exit framework
                 elif self.use_early_exit and not skip_mask:
-                    if self.exit_min_layer is not None and i < self.exit_min_layer: 
+                    if (self.exit_min_layer is not None and i < self.exit_min_layer) or i == 1: 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         # start = datetime.datetime.now()
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
@@ -965,6 +965,7 @@ class DeployT5Stack(T5Stack):
                         self.block_op[i] += 1
 
                     else:
+                        # print(f"Passing through Layer {i}")
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         start = datetime.datetime.now()
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
@@ -1002,7 +1003,7 @@ class DeployT5Stack(T5Stack):
                                 )
                             
                         else:
-                            
+
                             skip_mask = get_skip_mask(
                                 lm_logits,
                                 _hidden_states,
@@ -1013,7 +1014,6 @@ class DeployT5Stack(T5Stack):
                         
                         if not skip_mask: self.block_op[i] += 1                    
                         if skip_mask: 
-                            # print(f"Layer {i}")
                             self.lm_logits = lm_logits # This is where the logits are sent to do the predictions.
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
