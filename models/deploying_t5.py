@@ -1008,6 +1008,19 @@ class DeployT5Stack(T5Stack):
                                 alpha = 0.1,
                                 )
                             
+                        elif self.config.exit_conf_type == "JDS_contrastive_decoding":
+                            
+                            skip_mask = get_skip_mask_cd(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                                layer_exp = i,
+                                prev_probits = prev_probits, 
+                                layer_am = i//2,
+                                alpha = 0.1,
+                                )
                         else:
 
                             skip_mask = get_skip_mask(
