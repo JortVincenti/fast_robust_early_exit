@@ -680,6 +680,8 @@ if __name__ == "__main__":
             else DeployT5ForConditionalGeneration
     trainer_cls = QATrainer
 
+    wandb.login()
+
     wandb.init(
             # set the wandb project where this run will be logged
             project="contrastive_decoding",
@@ -692,7 +694,7 @@ if __name__ == "__main__":
                 "exit_conf_threshold": additional_args.exit_conf_threshold,
                 "exit_min_layer": additional_args.exit_min_layer,
                 },
-            mode="disabled" if TESTING else "online",
+            # mode="disabled" if TESTING else "online",
             )
     
     main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)

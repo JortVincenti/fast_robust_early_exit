@@ -1008,7 +1008,7 @@ class DeployT5Stack(T5Stack):
                                 alpha = 0.1,
                                 )
                             
-                        elif self.config.exit_conf_type == "JDS_contrastive_decoding":
+                        elif self.config.exit_conf_type == "JDS_contrastive_confidence":
                             
                             skip_mask = get_skip_mask_cd(
                                 lm_logits,
