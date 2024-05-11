@@ -548,6 +548,7 @@ class DeployT5Stack(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
         self.graph_top_k_list = []
+        self.graph_top_k_confidence = []
         self.top_k_indices = None
         
         self.embed_tokens = embed_tokens
@@ -1088,25 +1089,36 @@ class DeployT5Stack(T5Stack):
         if len(previous_logits) > 0:
             # Get the top-1 index of last block.
             index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
+            #print(torch.softmax(previous_logits[-1], dim=-1).shape)
+            confidence = torch.max(torch.softmax(previous_logits[-1], dim=-1), dim=-1)[0].item()
 
             # Initialize a list to store ranks at each layer
             ranks_at_layers = []
+            confidences_at_layers = []
 
             # Loop over previous layers in reverse order, stopping at the first layer
             for i in range(len(previous_logits) - 1, -1, -1):
                 # Get the sorted indices for this layer's logits
-                sorted_indices = torch.argsort(previous_logits[i], descending=True)
+                sorted_indices = torch.argsort(previous_logits[i][-1], descending=True)
 
                 # Find the rank of the top-1 index of the last block in the sorted indices of block i
                 rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
-
+                conf = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)[0].item()
+                #print(i ,rank, conf)
                 # Store the rank positions
                 ranks_at_layers.append(rank[0])
+                confidences_at_layers.append(conf)
+                
+
 
             ranks_at_layers.reverse() # Reverse the list to have the ranks in the correct order
             ranks_at_layers.append(0) # Append 0 to the end of the list to represent the rank at the last layer
 
+            confidences_at_layers.reverse() # Reverse the list to have the ranks in the correct order
+            confidences_at_layers.append(confidence) # Append 0 to the end of the list to represent the rank at the last layer
+
             self.graph_top_k_list.append(ranks_at_layers) # Append the ranks at each layer to the list of ranks
+            self.graph_top_k_confidence.append(confidences_at_layers) # Append the ranks at each layer to the list of ranks
 
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()

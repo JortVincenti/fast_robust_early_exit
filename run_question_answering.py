@@ -621,6 +621,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
 
         data = model.decoder.graph_top_k_list
+        data_conf = model.decoder.graph_top_k_confidence
 
         max_length = max(len(arr) for arr in data)
 
@@ -630,9 +631,16 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
                       mode='constant',
                       constant_values=np.nan)
                for arr in data]
+        
+        padded_conf = [np.pad(np.array(arr, dtype=float),  # Convert array to float
+                      (0, max_length - len(arr)),
+                      mode='constant',
+                      constant_values=np.nan)
+               for arr in data_conf]
 
         # Convert the list of arrays into a single NumPy array
         padded_array = np.array(padded_data)
+        padded_conf_array = np.array(padded_conf)
 
         # Converting the array to a DataFrame for easier handling in seaborn
         df = pd.DataFrame(padded_array)
@@ -648,21 +656,32 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
         # Compute the mean of the first column
         mean_block = np.nanmean(padded_array, axis=0)
-        min_block = np.nanmin(padded_array, axis=0)
-        max_block = np.nanmax(padded_array, axis=0)
+        mean_conf_block = np.nanmean(padded_conf_array, axis=0)
+        # min_block = np.nanmin(padded_array, axis=0)
+        # max_block = np.nanmax(padded_array, axis=0)
 
         # Plotting
         blocks = np.arange(mean_block.size)
 
         plt.figure(figsize=(10, 6))
         plt.plot(blocks, mean_block, label='Mean Top-K rank', color='midnightblue')
-        plt.fill_between(blocks, min_block, max_block, color='lightblue', alpha=0.5, label='Min/Max Range')
         plt.title('Mean, Max and Min top-k rank over blocks')
         plt.xlabel('Blocks')
         plt.ylabel('Top-K rank')
         plt.legend()
         plt.grid(True)
         plt.savefig("mean_topk_rank_eval.png")
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(blocks, mean_conf_block, label='Mean Top-K conf', color='red', linestyle='dashed')
+        plt.title('Confidence of top-1 rank over blocks')
+        plt.xlabel('Blocks')
+        plt.ylabel('Highest Softmax Confidence')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("conf_graph.png")
+
+
 
         # This is to plot all the lines, but it is not recommended for large datasets
         # Plotting each array
