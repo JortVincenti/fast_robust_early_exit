@@ -1,18 +1,17 @@
 """
 T5: https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py#L19
 """
-from typing import Optional, Tuple, Union, List, Callable
-import time
+from typing import Optional, Tuple, Union
+
+import os
 import copy
+import math
 import datetime
 import warnings
-import numpy as np
 import torch
-import math
-from einops import rearrange
-import torch.distributed as dist
 from torch import nn
 from torch.nn import CrossEntropyLoss
+from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from transformers.modeling_outputs import (
@@ -31,15 +30,16 @@ from transformers.models.t5.modeling_t5 import (
     T5ForConditionalGeneration
 )
 from transformers.models.t5.configuration_t5 import T5Config
-from transformers.generation.utils import GreedySearchDecoderOnlyOutput, GreedySearchEncoderDecoderOutput
-from transformers.generation.logits_process import LogitsProcessorList
-from transformers.generation.stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
 from transformers.utils import logging
 
 from util import (
+    compute_intermediate_loss,
+    compute_cm_head_loss,
+    split_tensors_by_mask, 
+    restore_tensors_by_mask,
     get_skip_mask,
-    BetaMixture1D,
-) 
+)
+
 
 logger = logging.get_logger(__name__)
 __HEAD_MASK_WARNING_MSG = """
@@ -48,51 +48,31 @@ The input argument `head_mask` was split into two arguments `head_mask` and `dec
 If you do not want to use any `decoder_head_mask` now, please set `decoder_head_mask = torch.ones(num_layers,
 num_heads)`.
 """
-GreedySearchOutput = Union[GreedySearchEncoderDecoderOutput, GreedySearchDecoderOnlyOutput]
 
 
-class DeployT5Attention(T5Attention):
+class EffT5Attention(T5Attention):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
-        """
-        Initialize the Deploy T5 Attention layer.
-
-        What's New:
-        - Initialization of configuration and model parameters.
-        - Initialization of Mesh TensorFlow to avoid scaling before softmax.
-        - Initialization of additional neural network layers if relative attention biases are enabled.
-
-        Args:
-            config (T5Config): Configuration object with model parameters.
-            has_relative_attention_bias (bool): Flag to indicate if relative attention biases are used.
-
-        The constructor extends the base T5Attention with specific configurations, and initializes
-        additional neural network layers if relative attention biases are enabled.
-        """
         super().__init__(config, has_relative_attention_bias)
-        self.config = config
-        ####### Initialization of configuration and model parameters #######        
-        self.is_decoder = config.is_decoder  # Boolean indicating if this is a decoder module
-        self.has_relative_attention_bias = has_relative_attention_bias  # Boolean for relative attention bias usage
-        self.relative_attention_num_buckets = config.relative_attention_num_buckets  # Number of buckets for relative attention
-        self.relative_attention_max_distance = config.relative_attention_max_distance  # Maximum distance for relative attention
-        self.d_model = config.d_model  # Dimension of the model
-        self.key_value_proj_dim = config.d_kv  # Dimension for key/value projections
-        self.n_heads = config.num_heads  # Number of attention heads
-        self.dropout = config.dropout_rate  # Dropout rate
-        self.inner_dim = self.n_heads * self.key_value_proj_dim  # Compute the inner dimension for the model
+        self.is_decoder = config.is_decoder
+        self.has_relative_attention_bias = has_relative_attention_bias
+        self.relative_attention_num_buckets = config.relative_attention_num_buckets
+        self.relative_attention_max_distance = config.relative_attention_max_distance
+        self.d_model = config.d_model
+        self.key_value_proj_dim = config.d_kv
+        self.n_heads = config.num_heads
+        self.dropout = config.dropout_rate
+        self.inner_dim = self.n_heads * self.key_value_proj_dim
 
-        ####### Mesh TensorFlow initialization to avoid scaling before softmax #######
-        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)  # Linear transformation for query
-        self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)  # Linear transformation for key
-        self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)  # Linear transformation for value
-        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)  # Linear transformation to output from attention heads
+        # Mesh TensorFlow initialization to avoid scaling before softmax
+        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
+        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
-        ####### Initialization of additional neural network layers if relative attention biases are enabled #######
         if self.has_relative_attention_bias:
             self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
         self.pruned_heads = set()
         self.gradient_checkpointing = False
-
 
     def forward(
         self,
@@ -105,9 +85,7 @@ class DeployT5Attention(T5Attention):
         query_length=None,
         use_cache=False,
         output_attentions=False,
-        skip_mask=False,
-        gen_cross_attn_key_value=False,
-        stack_hidden_states=None,
+        skip_mask=None,
     ):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
@@ -115,107 +93,99 @@ class DeployT5Attention(T5Attention):
         # Input is (batch_size, seq_length, dim)
         # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
         # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
-        
-        # Input and output preparation for attention operation
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        _, seq_length = hidden_states.shape[:2]
+        batch_size, seq_length = hidden_states.shape[:2]
 
-        real_seq_length = seq_length        
+        real_seq_length = seq_length
 
-        ####### Handling of past key-value states for incremental decoding ####### 
         if past_key_value is not None:
             assert (
                 len(past_key_value) == 2
             ), f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
-            if query_length is None:
-                if past_key_value[0] is not None: real_seq_length += past_key_value[0].shape[2]
-                if stack_hidden_states is not None: real_seq_length += stack_hidden_states.shape[1]
-            else:
-                real_seq_length += query_length
+            real_seq_length += past_key_value[0].shape[2] if query_length is None else query_length
 
         key_length = real_seq_length if key_value_states is None else key_value_states.shape[1]
 
+        def shape(states):
+            """projection"""
+            return states.view(states.shape[0], -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+
+        def unshape(states):
+            """reshape"""
+            return states.transpose(1, 2).contiguous().view(states.shape[0], -1, self.inner_dim)
+
         def project(hidden_states, proj_layer, key_value_states, past_key_value):
-            """Projects input states into query, key, or value states for attention."""
+            """projects hidden states correctly to key/query states"""
             if key_value_states is None:
-                # Self-attention projection
+                # self-attn
                 # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = rearrange(proj_layer(hidden_states), 'b l (h d) -> b h l d', h=self.n_heads)
+                hidden_states = shape(proj_layer(hidden_states))
             elif past_key_value is None:
-                # Cross-attention projection when there is no past key value
+                # cross-attn
                 # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = rearrange(proj_layer(key_value_states), 'b l (h d) -> b h l d', h=self.n_heads)
+                hidden_states = shape(proj_layer(key_value_states))
 
             if past_key_value is not None:
                 if key_value_states is None:
-                    # Append past key or value states for self-attention
+                    # self-attn
                     # (batch_size, n_heads, key_length, dim_per_head)
                     hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
                 elif past_key_value.shape[2] != key_value_states.shape[1]:
-                    # Handle mismatch in sequence lengths between past states and current key-value states
-                    # Cross-attention
+                    # checking that the `sequence_length` of the `past_key_value` is the same as
+                    # the provided `key_value_states` to support prefix tuning
+                    # cross-attn
                     # (batch_size, n_heads, seq_length, dim_per_head)
-                    hidden_states = rearrange(proj_layer(key_value_states), 'b l (h d) -> b h l d', h=self.n_heads)
+                    hidden_states = shape(proj_layer(key_value_states))
                 else:
-                    # Use past key or value states directly in cross-attention
+                    # cross-attn
                     hidden_states = past_key_value
             return hidden_states
-        
-        ####### Compute key and value states from hidden states #######
-        if self.is_decoder and key_value_states is None and stack_hidden_states is not None:
-            _hidden_states = torch.cat((stack_hidden_states,) + (hidden_states,), dim=1)
-        else:
-            _hidden_states = hidden_states
 
+        # get key/value states
         key_states = project(
-            _hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
+            hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
         )
         value_states = project(
-            _hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
+            hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
         )
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.is_decoder: self.key_value_gen_time = (datetime.datetime.now() - start)
 
-        ####### Generate cross-attention key-value pairs for past skipped tokens (if specified) #######
-        if gen_cross_attn_key_value:
-            return [key_states, value_states]
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-
-        ####### Initialize or use provided position bias for attention computation #######                
         if position_bias is None:
             if not self.has_relative_attention_bias:
-                # Default position bias for models without relative attention bias                
                 position_bias = torch.zeros(
                     (1, self.n_heads, real_seq_length, key_length), device=hidden_states.device, dtype=hidden_states.dtype
                 )
                 if self.gradient_checkpointing and self.training:
                     position_bias.requires_grad = True
             else:
-                # Compute position bias using a learned embedding table
                 position_bias = self.compute_bias(real_seq_length, key_length, device=hidden_states.device)
 
             # if key and values are already calculated
             # we want only the last query position bias
-            # Adjust position bias based on past states if necessary  
             if past_key_value is not None:
-                position_bias = position_bias[:, :, -hidden_states.size(1):, :]
+                position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
 
             if mask is not None:
-                # Apply mask to position bias for padded tokens or future tokens in causal attention
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
 
-        ####### Skip mask computation if not required ######## 
-        if skip_mask:
+        if skip_mask is not None and skip_mask.sum().item() == hidden_states.shape[0]:
             attn_output = None
         else:
+            if skip_mask is not None:
+                hidden_states, _, ids_restore = split_tensors_by_mask(hidden_states, skip_mask)
+
+                # key and value
+                key_states, skip_key_states, _ = split_tensors_by_mask(key_states, skip_mask, ids_restore=ids_restore)
+                value_states, skip_value_states, _ = split_tensors_by_mask(value_states, skip_mask, ids_restore=ids_restore)
+
             # get query states
-            query_states = rearrange(self.q(hidden_states), 'b l (h d) -> b h l d', h=self.n_heads)
+            query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
 
             # compute scores
-            scores = torch.einsum("bhid,bhjd->bhij", query_states, key_states)
+            scores = torch.matmul(
+                query_states, key_states.transpose(3, 2)
+            )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+
+            if skip_mask is not None:
+                position_bias, skip_position_bias, _ = split_tensors_by_mask(position_bias, skip_mask, ids_restore=ids_restore)
 
             if self.pruned_heads:
                 mask = torch.ones(position_bias.shape[1])
@@ -223,9 +193,11 @@ class DeployT5Attention(T5Attention):
                 position_bias_masked = position_bias[:, mask.bool()]
             else:
                 position_bias_masked = position_bias
-            scores += position_bias_masked
 
-            attn_weights = nn.functional.softmax(scores.float(), dim=-1)
+            scores += position_bias_masked
+            attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
+                scores
+            )  # (batch_size, n_heads, seq_length, key_length)
             attn_weights = nn.functional.dropout(
                 attn_weights, p=self.dropout, training=self.training
             )  # (batch_size, n_heads, seq_length, key_length)
@@ -234,29 +206,29 @@ class DeployT5Attention(T5Attention):
             if layer_head_mask is not None:
                 attn_weights = attn_weights * layer_head_mask
 
-            attn_output = torch.einsum("bhij,bhjd->bhid", attn_weights, value_states)
-            attn_output = rearrange(attn_output, 'b h s d -> b s (h d)', h=self.n_heads, d=self.key_value_proj_dim)
+            attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
             attn_output = self.o(attn_output)
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.is_decoder: self.attn_ffn_time = (datetime.datetime.now() - start)
 
-        ####### Prepare outputs including the present key-value states if caching is enabled #######
-        present_key_value_state = [key_states, value_states] if (self.is_decoder and use_cache) else None
+            # restore the skipped parts
+            if skip_mask is not None:
+                key_states = restore_tensors_by_mask(key_states, skip_key_states, ids_restore)
+                value_states = restore_tensors_by_mask(value_states, skip_value_states, ids_restore)
+                position_bias = restore_tensors_by_mask(position_bias, skip_position_bias, ids_restore)
+
+        present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
-        ####### Include attention weights in output if requested #######
         if output_attentions:
             outputs = outputs + (attn_weights,)
-            
+        if skip_mask is not None and skip_mask.sum().item() != hidden_states.shape[0]:
+            outputs = outputs + (ids_restore,)
         return outputs
 
 
-class DeployT5LayerSelfAttention(T5LayerSelfAttention):
+class EffT5LayerSelfAttention(T5LayerSelfAttention):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
-        self.config = config
-        self.SelfAttention = DeployT5Attention(config, has_relative_attention_bias=has_relative_attention_bias)
+        self.SelfAttention = EffT5Attention(config, has_relative_attention_bias=has_relative_attention_bias)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -269,16 +241,9 @@ class DeployT5LayerSelfAttention(T5LayerSelfAttention):
         past_key_value=None,
         use_cache=False,
         output_attentions=False,
-        skip_mask=False,
-        stack_hidden_states=None,
+        skip_mask=None,
     ):
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
         normed_hidden_states = self.layer_norm(hidden_states)
-        normed_stack_hidden_states = self.layer_norm(stack_hidden_states) if stack_hidden_states is not None else None
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        norm_time = (datetime.datetime.now() - start)
-
         attention_output = self.SelfAttention(
             normed_hidden_states,
             mask=attention_mask,
@@ -288,29 +253,28 @@ class DeployT5LayerSelfAttention(T5LayerSelfAttention):
             use_cache=use_cache,
             output_attentions=output_attentions,
             skip_mask=skip_mask,
-            stack_hidden_states=normed_stack_hidden_states,
         )
         
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        if not skip_mask:
+        if skip_mask is None:
             hidden_states = hidden_states + self.dropout(attention_output[0])
             outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
         else:
-            outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them     
+            if skip_mask.sum().item() != hidden_states.shape[0]:
+                ids_restore = attention_output[-1]
+                attention_output = attention_output[:-1]
 
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.config.is_decoder:
-            self.attn_ffn_time = self.SelfAttention.attn_ffn_time + norm_time + (datetime.datetime.now() - start)
-            self.key_value_gen_time = self.SelfAttention.key_value_gen_time
+                keep_hidden_states, hidden_states, _ = split_tensors_by_mask(hidden_states, skip_mask, ids_restore)
+                keep_hidden_states = keep_hidden_states + self.dropout(attention_output[0])
+                hidden_states = restore_tensors_by_mask(keep_hidden_states, hidden_states, ids_restore)   
+            outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them     
         return outputs
 
 
-class DeployT5LayerCrossAttention(T5LayerCrossAttention):
+class EffT5LayerCrossAttention(T5LayerCrossAttention):
     def __init__(self, config):
         super().__init__(config)
         self.config = config
-        self.EncDecAttention = DeployT5Attention(config, has_relative_attention_bias=False)
+        self.EncDecAttention = EffT5Attention(config, has_relative_attention_bias=False)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -325,18 +289,9 @@ class DeployT5LayerCrossAttention(T5LayerCrossAttention):
         use_cache=False,
         query_length=None,
         output_attentions=False,
-        skip_mask=False,
-        parallel_mask=False,
-        gen_cross_attn_key_value=False,
+        skip_mask=None,
     ):
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        if (not skip_mask and not gen_cross_attn_key_value) or parallel_mask:
-            normed_hidden_states = self.layer_norm(hidden_states)
-        else: normed_hidden_states = hidden_states
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        norm_time = (datetime.datetime.now() - start)
-        
+        normed_hidden_states = self.layer_norm(hidden_states)
         attention_output = self.EncDecAttention(
             normed_hidden_states,
             mask=attention_mask,
@@ -348,93 +303,32 @@ class DeployT5LayerCrossAttention(T5LayerCrossAttention):
             query_length=query_length,
             output_attentions=output_attentions,
             skip_mask=skip_mask,
-            gen_cross_attn_key_value=gen_cross_attn_key_value,
         )
-        if gen_cross_attn_key_value:
-            self.key_value_gen_time = self.EncDecAttention.key_value_gen_time
-            return attention_output  # non-autoregressively generated key_value_states
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        if not skip_mask:
-            hidden_states = hidden_states + self.dropout(attention_output[0])
-            outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
+        if skip_mask is None:
+            layer_output = hidden_states + self.dropout(attention_output[0])
+            outputs = (layer_output,) + attention_output[1:]  # add attentions if we output them
         else:
-            outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them   
+            if skip_mask.sum().item() != hidden_states.shape[0]:
+                ids_restore = attention_output[-1]
+                attention_output = attention_output[:-1]
 
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.config.is_decoder:
-            self.attn_ffn_time = self.EncDecAttention.attn_ffn_time + norm_time + (datetime.datetime.now() - start)
-            self.key_value_gen_time = self.EncDecAttention.key_value_gen_time 
+                keep_hidden_states, hidden_states, _ = split_tensors_by_mask(hidden_states, skip_mask, ids_restore)
+                keep_hidden_states = keep_hidden_states + self.dropout(attention_output[0])
+                hidden_states = restore_tensors_by_mask(keep_hidden_states, hidden_states, ids_restore)   
+            outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them     
         return outputs
 
 
-class DeployT5Block(T5Block):
+class EffT5Block(T5Block):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
-        self.config = config
-        self.is_decoder = config.is_decoder  # Flag to check if this block is part of the decoder
-
-        # Initialize layers in the block
+        self.is_decoder = config.is_decoder
         self.layer = nn.ModuleList()
-        self.layer.append(DeployT5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias))
-        
-        ######## decoder ########
+        self.layer.append(EffT5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias))
         if self.is_decoder:
-            # Add cross-attention layer only if it's a decoder
-            self.layer.append(DeployT5LayerCrossAttention(config))
+            self.layer.append(EffT5LayerCrossAttention(config))
 
-        ######## common ########
-        # Always add the feed-forward layer
         self.layer.append(T5LayerFF(config))
-    
-    ######## decoder ########
-    def get_shallow_logits(self, hidden_states):
-        # Generate logits from shallow hidden states (typically used in fast decoding)
-        shallow_hidden_states = self.layer[0].layer_norm(hidden_states)
-        shallow_hidden_states = self.dropout(shallow_hidden_states)
-        shallow_logits = self.lm_head(shallow_hidden_states)
-        return shallow_logits
-    
-    ######## decoder ########
-    def gen_cross_attn_key_value(
-        self,
-        hidden_states,
-        attention_mask=None,
-        position_bias=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        encoder_decoder_position_bias=None,
-        layer_head_mask=None,
-        cross_attn_layer_head_mask=None,
-        past_key_value=None,
-        use_cache=False,
-        output_attentions=False,
-    ):
-        r""" 
-        In Shallow-Deep framework, if all previous tokens, including <start> token, have skipped Deep decoder,
-        generate cross-attn key_values only ONCE because they are shared for all sequence.
-        
-        return (None, None) + cross_attn_past_key_value: Tuple[torch.Tensor] (length of 2)
-        """
-
-        # if all previous tokens, including <start> token, have skipped Deep decoder
-        assert self.is_decoder and encoder_hidden_states is not None
-        cross_attn_past_key_value = self.layer[1](
-            hidden_states,
-            key_value_states=encoder_hidden_states,
-            attention_mask=encoder_attention_mask,
-            position_bias=encoder_decoder_position_bias,
-            layer_head_mask=cross_attn_layer_head_mask,
-            past_key_value=past_key_value,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            gen_cross_attn_key_value=True,
-        )
-        self.key_value_gen_time = self.layer[1].key_value_gen_time
-
-        past_key_value = [None, None,] + cross_attn_past_key_value
-        return past_key_value
 
     def forward(
         self,
@@ -450,14 +344,8 @@ class DeployT5Block(T5Block):
         use_cache=False,
         output_attentions=False,
         return_dict=True,
-        skip_mask=False,
-        parallel_mask=False,
-        stack_hidden_states=None,
+        skip_mask=None,
     ):
-        # Process input through the block, handling both self-attention and cross-attention if applicable
-
-        ######## common ########
-        # Handling past key values for caching and faster processing
         if past_key_value is not None:
             if not self.is_decoder:
                 logger.warning("`past_key_values` is passed to the encoder. Please make sure this is intended.")
@@ -475,8 +363,6 @@ class DeployT5Block(T5Block):
         else:
             self_attn_past_key_value, cross_attn_past_key_value = None, None
 
-        ######## common ########
-        # Process self-attention
         self_attention_outputs = self.layer[0](
             hidden_states,
             attention_mask=attention_mask,
@@ -486,11 +372,19 @@ class DeployT5Block(T5Block):
             use_cache=use_cache,
             output_attentions=output_attentions,
             skip_mask=skip_mask,
-            stack_hidden_states=stack_hidden_states,
         )
         hidden_states, present_key_value_state = self_attention_outputs[:2]
         attention_outputs = self_attention_outputs[2:]  # Keep self-attention outputs and relative position weights
-        
+
+        # clamp inf values to enable fp16 training
+        if hidden_states.dtype == torch.float16:
+            clamp_value = torch.where(
+                torch.isinf(hidden_states).any(),
+                torch.finfo(hidden_states.dtype).max - 1000,
+                torch.finfo(hidden_states.dtype).max,
+            )
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+
         do_cross_attention = self.is_decoder and encoder_hidden_states is not None
         if do_cross_attention:
             # the actual query length is unknown for cross attention
@@ -499,7 +393,7 @@ class DeployT5Block(T5Block):
                 query_length = present_key_value_state[0].shape[2]
             else:
                 query_length = None
-            
+
             cross_attention_outputs = self.layer[1](
                 hidden_states,
                 key_value_states=encoder_hidden_states,
@@ -511,9 +405,17 @@ class DeployT5Block(T5Block):
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 skip_mask=skip_mask,
-                parallel_mask=parallel_mask,
             )
             hidden_states = cross_attention_outputs[0]
+
+            # clamp inf values to enable fp16 training
+            if hidden_states.dtype == torch.float16:
+                clamp_value = torch.where(
+                    torch.isinf(hidden_states).any(),
+                    torch.finfo(hidden_states.dtype).max - 1000,
+                    torch.finfo(hidden_states.dtype).max,
+                )
+                hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
             # Combine self attn and cross attn key value states
             if present_key_value_state is not None:
@@ -521,18 +423,24 @@ class DeployT5Block(T5Block):
 
             # Keep cross-attention outputs and relative position weights
             attention_outputs = attention_outputs + cross_attention_outputs[2:]
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
+
         # Apply Feed Forward layer
-        if not skip_mask:
+        if skip_mask is None:
             hidden_states = self.layer[-1](hidden_states)
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.is_decoder:
-            self.ffn_time = datetime.datetime.now() - start
-            self.key_value_gen_time = (self.layer[0].key_value_gen_time, self.layer[1].key_value_gen_time)
-            self.attn_time = (self.layer[0].attn_ffn_time, self.layer[1].attn_ffn_time)
+        else:
+            if skip_mask.sum().item() != hidden_states.shape[0]:
+                keep_hidden_states, hidden_states, ids_restore = split_tensors_by_mask(hidden_states, skip_mask)
+                keep_hidden_states = self.layer[-1](keep_hidden_states)
+                hidden_states = restore_tensors_by_mask(keep_hidden_states, hidden_states, ids_restore)
+
+        # clamp inf values to enable fp16 training
+        if hidden_states.dtype == torch.float16:
+            clamp_value = torch.where(
+                torch.isinf(hidden_states).any(),
+                torch.finfo(hidden_states.dtype).max - 1000,
+                torch.finfo(hidden_states.dtype).max,
+            )
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
         outputs = (hidden_states,)
 
@@ -544,219 +452,39 @@ class DeployT5Block(T5Block):
         return outputs  # hidden-states, present_key_value_states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
 
 
-class DeployT5Stack(T5Stack):
+class EffT5Stack(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
-        self.graph_top_k_list = []
-        self.graph_top_k_confidence = []
-        self.top_k_indices = None
         
         self.embed_tokens = embed_tokens
         self.is_decoder = config.is_decoder
 
         self.block = nn.ModuleList(
-            [DeployT5Block(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_layers)]
+            [EffT5Block(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_layers)]
         )
         self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
         # Initialize weights and apply final processing
         self.post_init()
+        # Model parallel
+        self.model_parallel = False
         self.device_map = None
         self.gradient_checkpointing = False
 
         # Early-Exit framework
-        self.use_early_exit = config.use_early_exit
-        self.exit_min_layer = config.exit_min_layer
+        self.use_early_exit = False
+        if self.is_decoder and config.exit_conf_type is not None:
+            self.use_early_exit = True
             
-        # Shallow-Deep Module
+        # Shallow-Deep framework
         self.use_shallow_deep = config.use_shallow_deep
         self.shallow_exit_layer = config.shallow_exit_layer
         if self.is_decoder and config.use_shallow_deep:
             assert config.shallow_exit_layer > 0 and config.shallow_exit_layer < len(self.block)
-        
-        # Synchronized Parallel Decoding
+
         self.block_op = [0] * config.num_layers  # to calculate the average number of forward block layers
-        self.parallel_tokens_shallow = 0  # how much tokens are used in parallel decoding as stack_hidden_states
-        self.parallel_tokens_deep = 0  # how much tokens are used in parallel decoding with skip_mask = False
-        self.stack_hidden_states = ()  # store hidden_states that do not forward Deep decoder
         
-        # Adaptive Threshold Estimator
-        self.bmm_model = BetaMixture1D()
-        self.bmm_threshold = None
-        self.stack_conf, self.stack_pred = (), ()
-        self.stack_conf_all, self.stack_ident_all = (), ()
-
-        if self.is_decoder:
-            self._reset_time_measure()
-        else: self.deploy_time = None
-        
-    def _reset_time_measure(self):
-        self.deploy_time = {'time_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
-                            'time_attn': [datetime.timedelta(), datetime.timedelta()],
-                            'time_ffn': datetime.timedelta(),
-                            'time_confidence': datetime.timedelta(),
-                            'time_exit_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
-                            'time_exit_attn': [datetime.timedelta(), datetime.timedelta()],
-                            'time_exit_ffn': datetime.timedelta(),
-                            'time_parallel_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
-                            'time_parallel_attn': [datetime.timedelta(), datetime.timedelta()],
-                            'time_parallel_ffn': datetime.timedelta(),
-                            'time_others': datetime.timedelta(),}
-
-    def parallel_gen_token(
-        self,
-        hidden_states,
-        attention_mask=None,
-        position_bias=None,
-        encoder_hidden_states=None,
-        encoder_extended_attention_mask=None,
-        encoder_decoder_position_bias=None,
-        head_mask=None,
-        cross_attn_head_mask=None,
-        past_key_values=None,
-        present_key_value_states=None,
-        use_cache=None,
-        output_attentions=None,
-        layer_idx=None,
-    ):
-        r""" 
-        if pask_key_values is not defined, it implies that all previous tokens have skipped Deep decoder.
-            Because all sequences share key_value of cross-attn layer,
-            we need to generate key_value of cross-attn layer only once for <start> token.
-        else:
-            key_values of cross-attn are already stored in 'past_key_values'.
-
-        Then, generate the next token in a non-autoregressive manner.
-        if copy_skipped_hidden_states is True,
-            copy previous skipped hidden_states for Deep decoder blocks.
-        else:
-            attention calculate for stack_hidden_states as well.
-            thus, we can utilize them in RollBack policy.
-        """
-        
-        if not self.config.copy_skipped_hidden_states:
-            hidden_states = torch.cat(self.stack_hidden_states + (hidden_states,), dim=1)            
-            # reset and re-calculate based on the length of hidden_states
-            extended_attention_mask, position_bias = None, None
-        else:
-            self.stack_hidden_states = torch.cat(self.stack_hidden_states, dim=1)
-            extended_attention_mask = attention_mask
-
-        previous_hidden_states = []
-        for j in range(layer_idx, len(self.block)):
-        
-            past_key_value = past_key_values[j]
-            if past_key_value is None:
-                # if pask_key_values is not defined, it implies that all previous tokens have skipped Deep decoder
-                # need to generate key_value of cross-attn layer only once for <start> token
-                past_key_value = self.block[j].gen_cross_attn_key_value(
-                    hidden_states,  # dummy
-                    attention_mask=extended_attention_mask,
-                    position_bias=position_bias,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    encoder_decoder_position_bias=encoder_decoder_position_bias,
-                    layer_head_mask=head_mask[j],
-                    cross_attn_layer_head_mask=cross_attn_head_mask[j],
-                    past_key_value=None,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                )
-                self.deploy_time['time_parallel_key_value_gen'][1] += self.block[j].key_value_gen_time
-            
-            if self.config.use_synchronize: torch.cuda.synchronize()
-            start = datetime.datetime.now()
-            if extended_attention_mask is None or position_bias is None:
-                real_seq_length = hidden_states.shape[1]
-                if past_key_value[0] is not None: real_seq_length += past_key_value[0].shape[2]
-                key_length = real_seq_length
-                
-                if self.config.parallel_causal_mask and extended_attention_mask is None:
-                    attention_mask = torch.ones(hidden_states.shape[0], real_seq_length, device=hidden_states.device)
-                    extended_attention_mask = self.get_extended_attention_mask(attention_mask, torch.Size([hidden_states.shape[0], hidden_states.shape[1]]))
-                
-                if position_bias is None:      
-                    position_bias = self.block[0].layer[0].SelfAttention.compute_bias(real_seq_length, key_length, device=hidden_states.device)
-
-                    # if key and values are already calculated
-                    # we want only the last query position bias
-                    if past_key_value is not None:
-                        position_bias = position_bias[:, :, -hidden_states.size(1):, :]
-
-                    if extended_attention_mask is not None:
-                        position_bias = position_bias + extended_attention_mask  # (batch_size, n_heads, seq_length, key_length)
-            
-            if self.config.use_synchronize: torch.cuda.synchronize()
-            self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-
-            layer_outputs = self.block[j]( #### Block forward pass, should be outputting the logits indeed no?
-                hidden_states,
-                attention_mask=extended_attention_mask,
-                position_bias=position_bias,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_extended_attention_mask,
-                encoder_decoder_position_bias=encoder_decoder_position_bias,
-                layer_head_mask=head_mask[j],
-                cross_attn_layer_head_mask=cross_attn_head_mask[j],
-                past_key_value=past_key_value,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                skip_mask=False,
-                parallel_mask=True,
-                stack_hidden_states=self.stack_hidden_states if self.config.copy_skipped_hidden_states else None,
-            )
-
-            
-
-            for idx, t in enumerate(self.block[j].key_value_gen_time): self.deploy_time['time_parallel_key_value_gen'][idx] += t
-            for idx, t in enumerate(self.block[j].attn_time): self.deploy_time['time_parallel_attn'][idx] += t
-            self.deploy_time['time_parallel_ffn'] += self.block[j].ffn_time
-            
-            if self.config.use_synchronize: torch.cuda.synchronize()
-            start = datetime.datetime.now()
-            # layer_outputs is a tuple with:
-            # hidden-states, key-value-states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
-            if use_cache is False:
-                layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
-
-            hidden_states, present_key_value_state = layer_outputs[:2]
-
-            ## saving hidden states to compare them
-            # previous_hidden_states.append(hidden_states)
-
-            # ## comparing them only when we are exiting. 
-            # mid_index = len(previous_hidden_states) // 2
-            # last_index = len(previous_hidden_states) - 1
-            # if len(previous_hidden_states) % 2 == 0:  # if the array length is even
-            #     hidden_states = previous_hidden_states[last_index] - previous_hidden_states[mid_index]
-            # else:  # if the array length is odd
-            #     hidden_states = previous_hidden_states[last_index] - previous_hidden_states[mid_index]
-            
-            
-
-
-            # We share the position biases between the layers - the first layer store them
-            # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
-            # (cross-attention position bias), (cross-attention weights)
-            position_bias = layer_outputs[2]
-            if self.is_decoder and encoder_hidden_states is not None:
-                encoder_decoder_position_bias = layer_outputs[4 if output_attentions else 3]
-            # append next layer key value states
-            if use_cache:
-                present_key_value_states = present_key_value_states + [present_key_value_state,]
-            
-            if self.config.use_synchronize: torch.cuda.synchronize()
-            self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        self.stack_hidden_states = ()
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-        
-        return hidden_states, present_key_value_states
-
     def forward(
         self,
         input_ids=None,
@@ -774,18 +502,10 @@ class DeployT5Stack(T5Stack):
         lm_head=None,
         cm_head=None,
     ):
-        r""" 
-        We have implemented the following inference strategy:
-
-        1) Normal framework: Forward all transformer layers.
-        2) Static framework: Only forward the pre-defined number of early layers.
-        3) Early-Exit framework: Each token can exit the forward path if confidence is higher than threshold.
-        4) Shallow-Deep framework: 
-            While a few early layers are defined as 'Shallow' decoder, the entire network including Shallow is defined as 'Deep' decoder.
-            Each token can skip the Deep decoder path if confidence at Shallow decoder is higher than threshold.
-        """
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
+        # Model parallel
+        if self.model_parallel:
+            torch.cuda.set_device(self.first_device)
+            self.embed_tokens = self.embed_tokens.to(self.first_device)
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -830,8 +550,6 @@ class DeployT5Stack(T5Stack):
         # initialize past_key_values with `None` if past does not exist
         if past_key_values is None:
             past_key_values = [None] * len(self.block)
-            self.stack_hidden_states = ()
-            self.stack_conf, self.stack_pred = (), ()
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
@@ -858,214 +576,148 @@ class DeployT5Stack(T5Stack):
         # Prepare head mask if needed
         head_mask = self.get_head_mask(head_mask, self.config.num_layers)
         cross_attn_head_mask = self.get_head_mask(cross_attn_head_mask, self.config.num_layers)
-        present_key_value_states = [] if use_cache else None
-        all_hidden_states = None
-        all_attentions = None
-        all_cross_attentions = None
+        present_key_value_states = () if use_cache else None
+        all_hidden_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+        all_cross_attentions = () if (output_attentions and self.is_decoder) else None
+        
         position_bias = None
         encoder_decoder_position_bias = None
 
         hidden_states = self.dropout(inputs_embeds)
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
 
-        skip_mask = False  # False: forward, and True: skip
-        self.shallow2deep = False  # False: skip, and True: forward
-        self.lm_logits = None  # to prevent calculating logits twice
-
+        skip_mask, self.skip_mask_cache = None, None
         previous_logits = []
-        for i, layer_module in enumerate(self.block):
-                
-            # Static framework
+        for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
             if self.is_decoder and self.config.static_exit_layer is not None:
                 if i == self.config.static_exit_layer: break
 
             layer_head_mask = head_mask[i]
             cross_attn_layer_head_mask = cross_attn_head_mask[i]
-            
-            # check that tokens are generated once in a time
-            auto_reg = True if hidden_states.shape[1] == 1 else False
-            if self.is_decoder and auto_reg and i == 0: self.block_op[i] += 1 # TO DO: Maybe implement the top_k here?
-                            
-            if self.is_decoder and auto_reg and i > 0:
+            # Model parallel
+            if self.model_parallel:
+                torch.cuda.set_device(hidden_states.device)
+                # Ensure that attention_mask is always on the same device as hidden_states
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(hidden_states.device)
+                if position_bias is not None:
+                    position_bias = position_bias.to(hidden_states.device)
+                if encoder_hidden_states is not None:
+                    encoder_hidden_states = encoder_hidden_states.to(hidden_states.device)
+                if encoder_extended_attention_mask is not None:
+                    encoder_extended_attention_mask = encoder_extended_attention_mask.to(hidden_states.device)
+                if encoder_decoder_position_bias is not None:
+                    encoder_decoder_position_bias = encoder_decoder_position_bias.to(hidden_states.device)
+                if layer_head_mask is not None:
+                    layer_head_mask = layer_head_mask.to(hidden_states.device)
+                if cross_attn_layer_head_mask is not None:
+                    cross_attn_layer_head_mask = cross_attn_layer_head_mask.to(hidden_states.device)
+            if output_hidden_states:
+                if self.is_decoder or i > 0:
+                    all_hidden_states = all_hidden_states + (self.dropout(self.final_layer_norm(hidden_states)),)
+                else:
+                    all_hidden_states = all_hidden_states + (hidden_states,)
+
+            if self.gradient_checkpointing and self.training:
+
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        return tuple(module(*inputs, use_cache, output_attentions))
+
+                    return custom_forward
+
+                layer_outputs = checkpoint(
+                    create_custom_forward(layer_module),
+                    hidden_states,
+                    extended_attention_mask,
+                    position_bias,
+                    encoder_hidden_states,
+                    encoder_extended_attention_mask,
+                    encoder_decoder_position_bias,
+                    layer_head_mask,
+                    cross_attn_layer_head_mask,
+                    None,  # past_key_value is always None with gradient checkpointing
+                )
+            else:
+                # check that tokens are generated once in a time
+                auto_reg = True if hidden_states.shape[1] == 1 else False
+                if self.is_decoder and (self.use_early_exit or self.use_shallow_deep) and auto_reg and i == 0: 
+                    self.block_op[i] += hidden_states.shape[0]
                 
-                # Shallow-Deep framework 
-                if self.use_shallow_deep and i == self.shallow_exit_layer:
-                    if self.config.use_synchronize: torch.cuda.synchronize()
-                    start = datetime.datetime.now()
-                    _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
-                    lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
-                        else lm_head(_hidden_states * (self.config.d_model ** -0.5))
-                        
-                    skip_mask, conf = get_skip_mask(
-                        lm_logits,
-                        _hidden_states,
+                # Shallow-Deep Framework
+                if self.is_decoder and auto_reg and self.use_shallow_deep and i == self.shallow_exit_layer:
+                    hidden_ = copy.deepcopy(hidden_states)
+
+                    hidden_ = self.dropout(self.final_layer_norm(hidden_))
+                    logits = lm_head(hidden_) if not self.config.tie_word_embeddings \
+                        else lm_head(hidden_ * (self.config.d_model ** -0.5))
+
+                    skip_mask = get_skip_mask(
+                        logits,
+                        hidden_,
                         cm_head,
                         config=self.config,
-                        adapt_threshold=self.bmm_threshold,
-                        return_conf=True,
+                        pos_time=past_key_value[0].shape[2] + 1 if past_key_value is not None else 1,
                     )
-                    self.stack_conf = self.stack_conf + (conf,)
-                    self.stack_pred = self.stack_pred + (lm_logits,)
                     
-                    if not skip_mask: self.block_op[i] += 1
-                    if self.config.use_synchronize: torch.cuda.synchronize()
-                    self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
+                    self.block_op[i] += (skip_mask.shape[0] - skip_mask.sum().item())
+                
+                # exploit early-exit mask: softmax and meta
+                elif self.is_decoder and auto_reg and self.use_early_exit and i > 0:
+                    if self.skip_mask_cache is None or (self.skip_mask_cache.shape[0] != self.skip_mask_cache.sum().item()):
+                        hidden_ = copy.deepcopy(hidden_states)
+                        if self.skip_mask_cache is not None:  # self.skip_mask_cache.shape[0] != self.skip_mask_cache.sum().item()
+                            hidden_, _, ids_restore = split_tensors_by_mask(hidden_, self.skip_mask_cache)
+                            _, skip_cache, _ = split_tensors_by_mask(self.skip_mask_cache, self.skip_mask_cache, ids_restore)
 
-                    # if skip Deep decoder, store hidden_states at self.shallow_exit_layer
-                    if skip_mask:
-                        if self.config.use_synchronize: torch.cuda.synchronize()
-                        start = datetime.datetime.now()
-                        self.lm_logits = lm_logits
-                        if self.config.parallel_gen_token:
-                            if use_cache:
-                                for j in range(i, len(self.block)):
-                                    present_key_value_states = present_key_value_states + [past_key_values[j],]
-                            self.stack_hidden_states = self.stack_hidden_states + (hidden_states,)
+                        hidden_ = self.dropout(self.final_layer_norm(hidden_))
+                        logits = lm_head(hidden_) if not self.config.tie_word_embeddings \
+                            else lm_head(hidden_ * (self.config.d_model ** -0.5))
                         
-                        if self.config.use_synchronize: torch.cuda.synchronize()
-                        if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-                        break
-
-                    if not skip_mask:
-                        self.shallow2deep = True
-                        # if self.config.parallel_gen_token:
-                        if self.config.parallel_gen_token and len(self.stack_hidden_states):
-                            self.parallel_tokens_shallow += len(self.stack_hidden_states)
-                            self.parallel_tokens_deep += 1
-                            
-                            # in Shallow-Deep decoder, generate the next token in a non-autoregressive manner
-                            hidden_states, present_key_value_states = self.parallel_gen_token(
-                                hidden_states,
-                                attention_mask=extended_attention_mask,
-                                position_bias=position_bias,
-                                encoder_hidden_states=encoder_hidden_states,
-                                encoder_extended_attention_mask=encoder_extended_attention_mask,
-                                encoder_decoder_position_bias=encoder_decoder_position_bias,
-                                head_mask=head_mask,
-                                cross_attn_head_mask=cross_attn_head_mask,
-                                past_key_values=past_key_values,
-                                present_key_value_states=present_key_value_states,
-                                use_cache=use_cache,
-                                output_attentions=output_attentions,
-                                layer_idx=self.shallow_exit_layer,
-                            )
-                            
-                            # Adaptive Threshold Estimator
-                            if self.config.use_adapt_threshold:
-                                # Calibration Set Update
-                                self.lm_logits = self.lm_head(self.dropout(self.final_layer_norm(hidden_states)))
-                                deep_pred = self.lm_logits.argmax(-1)
-                                shallow_pred = torch.cat(self.stack_pred).argmax(-1).view(-1)
-
-                                self.stack_conf_all += self.stack_conf
-                                self.stack_ident_all += ((deep_pred.view(-1) == shallow_pred.view(-1)).long().cpu().numpy(),)
-                                self.stack_conf, self.stack_pred = (), ()
-                                
-                            break
-
-                # Early-Exit framework
-                elif self.use_early_exit and not skip_mask:
-                    if self.exit_min_layer is not None and i < self.exit_min_layer: 
-                        self.block_op[i] += 1
-                    else:
-                        if self.config.use_synchronize: torch.cuda.synchronize()
-                        
-                        start = datetime.datetime.now() 
-                        _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
-                        _hidden_states = (_hidden_states * (self.config.d_model ** -0.5)) if self.config.tie_word_embeddings else _hidden_states
-
-                        # SHRINKING VOCAB PART:
-                        if not self.config.type_vocab_reduct: # If we are not using any vocab reduction
-                            lm_logits = lm_head(_hidden_states)
-                        else:
-                            starting_layer = self.confit.exit_min_layer if self.config.exit_min_layer is not None else 1 # Start where exit_min_layer is set.
-                            if i == starting_layer: # if it is the first layer
-                                lm_logits = lm_head(_hidden_states)
-                                # Get the top 2500 logits at block 1.
-                                k = 2500 # TO DO: DEFINED THIS AS ARGUMENT self.config.top_k when it works!!!
-                                _, self.top_k_indices = torch.topk(lm_logits, k, largest=True, sorted=True)
-                                self.top_k_indices = self.top_k_indices.flatten() # TO DO: Find a faster way to do this
-                                # print("top_k_indices at block 1 is", self.top_k_indices.shape)
-                                selected_weights = lm_head.weight[self.top_k_indices, :] # THis can be done here to win some compute time
-                            else: # For all the other layers either use fixed, decaying or adaptive pruning
-                                if self.config.type_vocab_reduct == "fixed": 
-                                    # Note: There is no bias in self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-                                    lm_logits = torch.nn.functional.linear(_hidden_states, selected_weights) # Get new logits with the top-200 weights
-                                    # Note: Using nn.functional.linear should always outperform (in terms of time) the lm_head(_hidden_states) as it uses the same function but with the whole data.
-                                elif self.config.type_vocab_reduct == "decaying":  # Smoothed pruning! For all the other layers -> smoothed pruning
-                                    def func_inverse(i, k1, k2, num_layers): # this is the function for doing smoothed pruning
-                                        return max(k2, int(k1 / (1 + (k1 - k2) / k2 * i / num_layers)))
-                                    #maximum_k_size = 200 # where 200 is the maximum number of weights to keep ( it actually immediately decreases so it is lower thatn this)
-                                    #minimum_k_size = 20 # where 20 is the minimum number of weights to keep
-                                    #current_k = func_inverse(i,maximum_k_size, minimum_k_size, 12) # TO DO: 12 is the number of layers in the base model adapt it to either base or large.
-                                    
-                                    top_k_list = [4500, 2500, 2000, 1000, 750, 700, 600, 500, 400, 300, 100, 50] # This is the list of top_k values for each block based on graph.
-                                    selected_weights = lm_head.weight[self.top_k_indices[:top_k_list[i]], :]
-
-                                    # Use these selected weights to compute the logits for this layer.
-                                    lm_logits = torch.nn.functional.linear(hidden_states, selected_weights)
-                                elif self.config.type_vocab_reduct == "adaptive":
-                                    raise("Not implemented yet")
-                                else: 
-                                    raise("Please provide a valid type_vocab_reduct argument. Either use fixed, decaying, or adaptive.")
-
-                        # ====================================================================================================
-                        #print("lm_logits shape is", lm_logits.shape, "for layer", i)
                         ## then teh logit comparison needs to be done here
-                        previous_logits.append(lm_logits)
+                        previous_logits.append(logits)
+                        print("lm_logits difference:\n")
                         ## comparing them only when we are exiting. 
-                        #print(self.config)
+                        mid_index = len(previous_logits) // 2
+                        last_index = len(previous_logits) - 1
+                        if len(previous_logits) % 2 == 0:  # if the array length is even
+                            print(previous_logits[last_index] - previous_logits[mid_index])
+                            logits = previous_logits[last_index] - previous_logits[mid_index]
+                        else:  # if the array length is odd
+                            print(previous_logits[last_index] - previous_logits[mid_index])
+                            logits = previous_logits[last_index] - previous_logits[mid_index]
+                        
+                        print("performed logits difference\n")
+
                         skip_mask = get_skip_mask(
-                            lm_logits,
-                            _hidden_states,
+                            logits,
+                            hidden_,
                             cm_head,
                             config=self.config,
-                            pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
+                            pos_time=past_key_value[0].shape[2] + 1 if past_key_value is not None else 1,
                         )
+                        self.block_op[i] += (skip_mask.shape[0] - skip_mask.sum().item())
 
-                        #print("*"*100)
+                        if self.skip_mask_cache is None:
+                            self.skip_mask_cache = skip_mask
+                        else:
+                            skip_mask = self.skip_mask_cache = restore_tensors_by_mask(skip_mask, skip_cache, ids_restore)
                         
-                        if not skip_mask: self.block_op[i] += 1                    
-                        if skip_mask: self.lm_logits = lm_logits # I would assume this is where the logits get checked for whether they satisfy the threshold
+                layer_outputs = layer_module(
+                    hidden_states,
+                    attention_mask=extended_attention_mask,
+                    position_bias=position_bias,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_extended_attention_mask,
+                    encoder_decoder_position_bias=encoder_decoder_position_bias,
+                    layer_head_mask=layer_head_mask,
+                    cross_attn_layer_head_mask=cross_attn_layer_head_mask,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    skip_mask=skip_mask,
+                )
 
-                        if self.config.use_synchronize: torch.cuda.synchronize()
-                        self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
-                    
-                # Normal framework
-                elif (not self.use_shallow_deep and not self.use_early_exit):
-                    self.block_op[i] += 1
-                
-            past_key_value = past_key_values[i]
-            layer_outputs = layer_module(
-                hidden_states,
-                attention_mask=extended_attention_mask,
-                position_bias=position_bias,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_extended_attention_mask,
-                encoder_decoder_position_bias=encoder_decoder_position_bias,
-                layer_head_mask=layer_head_mask,
-                cross_attn_layer_head_mask=cross_attn_layer_head_mask,
-                past_key_value=past_key_value,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                skip_mask=skip_mask,
-            )
-
-            # logits are in layer_outputs
-
-            # save them and compute new logits!
-
-            if self.is_decoder:
-                if self.config.use_early_exit: prefix = 'time_exit_' if skip_mask else 'time_'
-                elif self.config.use_shallow_deep: prefix = 'time_parallel_' if self.shallow2deep else 'time_'
-                else: prefix = 'time_'
-                for idx, t in enumerate(layer_module.key_value_gen_time): self.deploy_time[prefix + 'key_value_gen'][idx] += t
-                for idx, t in enumerate(layer_module.attn_time): self.deploy_time[prefix + 'attn'][idx] += t
-                self.deploy_time[prefix + 'ffn'] += layer_module.ffn_time
-            
-            if self.config.use_synchronize: torch.cuda.synchronize()
-            start = datetime.datetime.now()
             # layer_outputs is a tuple with:
             # hidden-states, key-value-states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
             if use_cache is False:
@@ -1081,52 +733,25 @@ class DeployT5Stack(T5Stack):
                 encoder_decoder_position_bias = layer_outputs[4 if output_attentions else 3]
             # append next layer key value states
             if use_cache:
-                present_key_value_states = present_key_value_states + [present_key_value_state,]
-            
-            if self.config.use_synchronize: torch.cuda.synchronize()
-            if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-                
-        if len(previous_logits) > 0:
-            # Get the top-1 index of last block.
-            index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
-            #print(torch.softmax(previous_logits[-1], dim=-1).shape)
-            confidence = torch.max(torch.softmax(previous_logits[-1], dim=-1), dim=-1)[0].item()
+                present_key_value_states = present_key_value_states + (present_key_value_state,)
 
-            # Initialize a list to store ranks at each layer
-            ranks_at_layers = []
-            confidences_at_layers = []
+            if output_attentions:
+                all_attentions = all_attentions + (layer_outputs[3],)
+                if self.is_decoder:
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[5],)
 
-            # Loop over previous layers in reverse order, stopping at the first layer
-            for i in range(len(previous_logits) - 1, -1, -1):
-                # Get the sorted indices for this layer's logits
-                sorted_indices = torch.argsort(previous_logits[i][-1], descending=True)
+            # Model Parallel: If it's the last layer for that device, put things on the next device
+            if self.model_parallel:
+                for k, v in self.device_map.items():
+                    if i == v[-1] and "cuda:" + str(k) != self.last_device:
+                        hidden_states = hidden_states.to("cuda:" + str(k + 1))
 
-                # Find the rank of the top-1 index of the last block in the sorted indices of block i
-                rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
-                conf = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)[0].item()
-                #print(i ,rank, conf)
-                # Store the rank positions
-                ranks_at_layers.append(rank[0])
-                confidences_at_layers.append(conf)
-                
+        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.dropout(hidden_states)
 
-
-            ranks_at_layers.reverse() # Reverse the list to have the ranks in the correct order
-            ranks_at_layers.append(0) # Append 0 to the end of the list to represent the rank at the last layer
-
-            confidences_at_layers.reverse() # Reverse the list to have the ranks in the correct order
-            confidences_at_layers.append(confidence) # Append 0 to the end of the list to represent the rank at the last layer
-
-            self.graph_top_k_list.append(ranks_at_layers) # Append the ranks at each layer to the list of ranks
-            self.graph_top_k_confidence.append(confidences_at_layers) # Append the ranks at each layer to the list of ranks
-
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        if not skip_mask and self.lm_logits is None: # If threshold is "not satisfied", then compute the new block logits
-            hidden_states = self.final_layer_norm(hidden_states)
-            hidden_states = self.dropout(hidden_states)
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
+        # Add last layer
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
             return tuple(
@@ -1149,7 +774,7 @@ class DeployT5Stack(T5Stack):
         )
 
 
-class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
+class EffT5ForConditionalGeneration(T5ForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
         self.model_dim = config.d_model
@@ -1161,50 +786,32 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
         encoder_config.static_exit_layer = None
-        self.encoder = DeployT5Stack(encoder_config, self.shared)
+        self.encoder = EffT5Stack(encoder_config, self.shared)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
         decoder_config.is_encoder_decoder = False
         decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = DeployT5Stack(decoder_config, self.shared)
+        self.decoder = EffT5Stack(decoder_config, self.shared)
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.decoder.lm_head = self.lm_head
-        if self.config.exit_conf_type == 'meta' or self.config.shallow2deep_conf_type == "meta":
+        
+        if self.config.exit_conf_type == 'meta' or self.config.shallow2deep_conf_type:
             self.cm_head = nn.Sequential(
-                nn.Linear(config.d_model, config.d_model, bias=True),
+                nn.Linear(config.d_model, config.d_model, bias=False),
                 nn.ReLU(),
-                nn.Linear(config.d_model, 2, bias=True),
+                nn.Linear(config.d_model, 2, bias=False),
             )
-        else:
-            self.cm_head = None
-
-        # RollBack policy
-        self.rollback_num = 0
-        self.criterion = nn.CrossEntropyLoss(reduction='none')
+        else: self.cm_head = None
         
-        # BMM
-        self.bmm_update_iter = 0
-        self.bmm_update_max_iter = 300
         
-        self.deploy_time = {
-            'time_encoder_forward': datetime.timedelta(),
-            'time_decoder_forward': datetime.timedelta(),
-            'time_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
-            'time_attn': [datetime.timedelta(), datetime.timedelta()],
-            'time_ffn': datetime.timedelta(),
-            'time_confidence': datetime.timedelta(),
-            'time_exit_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
-            'time_exit_attn': [datetime.timedelta(), datetime.timedelta()],
-            'time_exit_ffn': datetime.timedelta(),
-            'time_parallel_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
-            'time_parallel_attn': [datetime.timedelta(), datetime.timedelta()],
-            'time_parallel_ffn': datetime.timedelta(),
-            'time_estimate_conf': datetime.timedelta(),
-            'time_others': datetime.timedelta(),
-        }
-
+        if self.config.intermediate_loss_fn is not None and ('shallowdeep_kd' in self.config.intermediate_loss_fn) and self.config.do_layer_transformation:
+            self.layer_transformation = nn.Linear(
+                config.hidden_size, config.hidden_size)
+        else: self.layer_transformation = None
+        
+        self.deploy_time = None
+    
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1225,47 +832,57 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]:
         r"""
-        DeployT5ForConditionalGeneration class is for a deployment scenario,
-        where the decoder models are communicating with only one user (i.e., the batch size of 1).
+        EffT5ForConditionalGeneration class is for the evaluation of LLMs.
+        This class supports the batch size larger than 1, via two functions:
 
-        Here, for the faster inference, we have implemented non-autoregressive hidden_state copying in Shallow-Deep framework.
+        1) split_tensors_by_mask : split tensors with skip_mask, which decides to keep or skip the forward path.
+        2) restore_tensors_by_mask : restore splited tensors to the original order by ids_restore.
+
+        eval_time or avg_num_blocks, measured by this class, is not correct to our intention of methodology
+        since skipped tokens just sequentially copy hidden_states and they should wait until other samples in the batch are finished.
         """
-
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        encoder_outputs, decoder_outputs = self.forward_impl(input_ids, attention_mask, decoder_input_ids, decoder_attention_mask,
-                                                            head_mask, decoder_head_mask, cross_attn_head_mask, encoder_outputs,
-                                                            past_key_values, inputs_embeds, decoder_inputs_embeds, labels, use_cache,
-                                                            output_attentions, output_hidden_states, return_dict)
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
-        if self.decoder.lm_logits is None:  # token has not skipped
-            sequence_output = decoder_outputs[0]
+        output_hidden_states = True
+        if not self.config.train_meta_cm_head:
+            encoder_outputs, decoder_outputs = self.forward_impl(input_ids, attention_mask, decoder_input_ids, decoder_attention_mask,
+                                                                    head_mask, decoder_head_mask, cross_attn_head_mask, encoder_outputs,
+                                                                    past_key_values, inputs_embeds, decoder_inputs_embeds, labels, use_cache,
+                                                                    output_attentions, output_hidden_states, return_dict)
+        else:
+            # for training meta cm_head
+            with torch.no_grad():
+                encoder_outputs, decoder_outputs = self.forward_impl(input_ids, attention_mask, decoder_input_ids, decoder_attention_mask,
+                                                                    head_mask, decoder_head_mask, cross_attn_head_mask, encoder_outputs,
+                                                                    past_key_values, inputs_embeds, decoder_inputs_embeds, labels, use_cache,
+                                                                    output_attentions, output_hidden_states, return_dict)
+        sequence_output = decoder_outputs[0]
 
-            if self.config.tie_word_embeddings:
-                # Rescale output before projecting on vocab
-                # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-                sequence_output = sequence_output * (self.model_dim**-0.5)
-            
-            lm_logits = self.lm_head(sequence_output)
-        else: lm_logits = self.decoder.lm_logits
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        self.deploy_time['time_decoder_forward'] += (datetime.datetime.now() - start)
+        # Set device for model parallelism
+        if self.model_parallel:
+            torch.cuda.set_device(self.encoder.first_device)
+            self.lm_head = self.lm_head.to(self.encoder.first_device)
+            sequence_output = sequence_output.to(self.lm_head.weight.device)
 
-        if self.decoder.shallow2deep: 
-            self.decoder.stack_conf, self.decoder.stack_pred = (), ()
-        if self.config.rollback_conf_threshold is None:
-            lm_logits = lm_logits[:, [-1], :]
-        loss = self.compute_model_loss(lm_logits, labels)
+        if self.config.tie_word_embeddings:
+            # Rescale output before projecting on vocab
+            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+            sequence_output = sequence_output * (self.model_dim**-0.5)
+                
+        lm_logits = self.lm_head(sequence_output)
+
+        if not self.config.output_hidden_states_decoder or not self.training:
+            loss = self.compute_model_loss(lm_logits, labels)
+        elif self.config.intermediate_loss_fn is not None:
+            loss = compute_intermediate_loss(self.config, self.lm_head, self.model_dim, lm_logits, labels, decoder_outputs[2][1:], self.layer_transformation)
+        elif self.config.train_meta_cm_head:
+            loss = compute_cm_head_loss(self.config, self.lm_head, self.cm_head, self.model_dim, decoder_outputs[2][1:])
 
         if not return_dict:
             output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
             return ((loss,) + output) if loss is not None else output
-
+        
         return Seq2SeqLMOutput(
             loss=loss,
             logits=lm_logits,
@@ -1306,7 +923,7 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-    
+        
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
             if self.config.num_layers == self.config.num_decoder_layers:
@@ -1314,8 +931,6 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
                 decoder_head_mask = head_mask
 
         # Encode if needed (training, first prediction pass)
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
         if encoder_outputs is None:
             # Convert encoder inputs in embeddings if needed
             encoder_outputs = self.encoder(
@@ -1327,32 +942,33 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-
         elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
             encoder_outputs = BaseModelOutput(
                 last_hidden_state=encoder_outputs[0],
                 hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
                 attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
             )
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        self.deploy_time['time_encoder_forward'] += (datetime.datetime.now() - start)
-        
+
         hidden_states = encoder_outputs[0]
-        
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        start = datetime.datetime.now()
+
+        if self.model_parallel:
+            torch.cuda.set_device(self.decoder.first_device)
+
         if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
             # get decoder inputs from shifting lm labels to the right
             decoder_input_ids = self._shift_right(labels)
-            
-        if past_key_values is None and len(self.decoder.stack_conf_all) > 0 and self.bmm_update_iter < self.bmm_update_max_iter:
-            X = np.hstack(self.decoder.stack_conf_all)
-            Y = np.hstack(self.decoder.stack_ident_all)
-            self.decoder.bmm_model.fit(X, Y)
-            
-            self.decoder.bmm_threshold = self.decoder.bmm_model.predict_proba(0.3, 0.9)
-            self.bmm_update_iter += 1
-        
+
+        # Set device for model parallelism
+        if self.model_parallel:
+            torch.cuda.set_device(self.decoder.first_device)
+            hidden_states = hidden_states.to(self.decoder.first_device)
+            if decoder_input_ids is not None:
+                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(self.decoder.first_device)
+            if decoder_attention_mask is not None:
+                decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
+
         # Decode
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
@@ -1365,317 +981,9 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
             cross_attn_head_mask=cross_attn_head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=self.config.output_hidden_states_decoder,
             return_dict=return_dict,
             lm_head=self.lm_head,
             cm_head=self.cm_head,
         )
-        if self.config.use_synchronize: torch.cuda.synchronize()
-        self.deploy_time['time_decoder_forward'] += (datetime.datetime.now() - start)
-        for k, v in self.decoder.deploy_time.items():
-            if type(v) != list: self.deploy_time[k] += v
-            else: self.deploy_time[k] = [_d + _v for _d, _v in zip(self.deploy_time[k], v)]
-        self.decoder._reset_time_measure()
-
         return encoder_outputs, decoder_outputs
-
-    def greedy_search(
-        self,
-        input_ids: torch.LongTensor,
-        logits_processor: Optional[LogitsProcessorList] = None,
-        stopping_criteria: Optional[StoppingCriteriaList] = None,
-        max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[Union[int, List[int]]] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_scores: Optional[bool] = None,
-        return_dict_in_generate: Optional[bool] = None,
-        synced_gpus: bool = False,
-        streamer: Optional["BaseStreamer"] = None,
-        **model_kwargs,
-    ) -> Union[GreedySearchOutput, torch.LongTensor]:
-        r"""
-        Generates sequences of token ids for models with a language modeling head using **greedy decoding** and can be
-        used for text-decoder, text-to-text, speech-to-text, and vision-to-text models.
-
-        <Tip warning={true}>
-
-        In most cases, you do not need to call [`~generation.GenerationMixin.greedy_search`] directly. Use generate()
-        instead. For an overview of generation strategies and code examples, check the [following
-        guide](../generation_strategies).
-        """
-
-        # init values
-        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
-        stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
-        if max_length is not None:
-            warnings.warn(
-                "`max_length` is deprecated in this function, use"
-                " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
-                UserWarning,
-            )
-            stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-        pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
-        output_scores = output_scores if output_scores is not None else self.generation_config.output_scores
-        output_attentions = (
-            output_attentions if output_attentions is not None else self.generation_config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.generation_config.output_hidden_states
-        )
-        return_dict_in_generate = (
-            return_dict_in_generate
-            if return_dict_in_generate is not None
-            else self.generation_config.return_dict_in_generate
-        )
-
-        # init attention / hidden states / scores tuples
-        scores = () if (return_dict_in_generate and output_scores) else None
-        decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
-        cross_attentions = () if (return_dict_in_generate and output_attentions) else None
-        decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
-
-        # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
-        if return_dict_in_generate and self.config.is_encoder_decoder:
-            encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
-            encoder_hidden_states = (
-                model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
-            )
-
-        # keep track of which sequences are already finished
-        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
-
-        this_peer_finished = False  # used by synced_gpus only
-
-        # for RollBack policy
-        self.rollback_candidates = ()
-        self.pass_length_rollback = 0
-
-        while True:
-            if synced_gpus:
-                # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
-                # The following logic allows an early break if all peers finished generating their sequence
-                this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0).to(input_ids.device)
-                # send 0.0 if we finished, 1.0 otherwise
-                dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
-                # did all peers finish? the reduced sum will be 0.0 then
-                if this_peer_finished_flag.item() == 0.0:
-                    break
-
-            # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
-            # forward pass to get next token
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )       
-
-            if synced_gpus and this_peer_finished:
-                continue  # don't waste resources running the code we don't need
-            
-            # RollBack policy
-            if self.config.use_shallow_deep and self.decoder.shallow2deep and not self.config.copy_skipped_hidden_states and self.config.rollback_conf_threshold is not None:
-                if self.config.use_synchronize: torch.cuda.synchronize()
-                start = datetime.datetime.now()
-
-                seq_len = outputs.logits.size(1)
-                if seq_len == 1:
-                    # stack_hidden_states is empty, so do not need to RollBack
-                    assert len(self.rollback_candidates) == 0
-                    self.pass_length_rollback += 1
-                
-                else:
-                    # we should check RollBack
-                    assert seq_len - 1 == len(self.rollback_candidates)
-                    
-                    deep_logits = outputs.logits[:, :-1, :]
-                    shallow_preds = torch.cat(self.rollback_candidates, dim=0)
-                    rollback_loss = self.criterion(deep_logits.squeeze(0), shallow_preds)
-
-                    for j, _loss in enumerate(rollback_loss):
-                        if _loss.item() > self.config.rollback_conf_threshold:
-                            # RollBack
-                            outputs.logits = deep_logits[:, [j], :]
-                            
-                            # remove RollBacked tokens
-                            input_ids = input_ids[:, :self.pass_length_rollback + 1]  # consider sos token
-                            past_key_values = []
-                            for past in outputs.past_key_values:
-                                past_key_values += [[past[0][:, :, :self.pass_length_rollback + 1, :],  # self-attn key
-                                                     past[1][:, :, :self.pass_length_rollback + 1, :],  # self-attn value
-                                                     past[2],
-                                                     past[3]],]
-                            outputs.past_key_values = past_key_values
-
-                            self.decoder.block_op[0] -= (seq_len - 1) - j
-                            self.rollback_num += (seq_len - 1) - j
-                            break
-                        else:
-                            self.pass_length_rollback += 1
-                    
-                    self.rollback_candidates = ()
-                    self.pass_length_rollback += 1
-                    
-                if self.config.use_synchronize: torch.cuda.synchronize()
-                self.deploy_time['time_decoder_forward'] += (datetime.datetime.now() - start)
-
-            next_token_logits = outputs.logits[:, -1, :]
-
-            # pre-process distribution
-            next_tokens_scores = logits_processor(input_ids, next_token_logits)
-
-            # Store scores, attentions and hidden_states when required
-            if return_dict_in_generate:
-                if output_scores:
-                    scores += (next_tokens_scores,)
-                if output_attentions:
-                    decoder_attentions += (
-                        (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
-                    )
-                    if self.config.is_encoder_decoder:
-                        cross_attentions += (outputs.cross_attentions,)
-
-                if output_hidden_states:
-                    decoder_hidden_states += (
-                        (outputs.decoder_hidden_states,)
-                        if self.config.is_encoder_decoder
-                        else (outputs.hidden_states,)
-                    )
-
-            # argmax
-            next_tokens = torch.argmax(next_tokens_scores, dim=-1)
-
-            # for RollBack, store Shallow decoder's predictions
-            if self.config.use_shallow_deep and not self.decoder.shallow2deep and not self.config.copy_skipped_hidden_states and self.config.rollback_conf_threshold is not None:
-                self.rollback_candidates += (next_tokens,)
-
-            # finished sentences should have their next token be a padding token
-            if eos_token_id is not None:
-                if pad_token_id is None:
-                    raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
-
-            # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-
-            if streamer is not None:
-                streamer.put(next_tokens.cpu())
-            model_kwargs = self._update_model_kwargs_for_generation(
-                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
-            )
-
-            # if eos_token was found in one sentence, set sentence to finished
-            if eos_token_id_tensor is not None:
-                unfinished_sequences = unfinished_sequences.mul(
-                    next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
-                )
-
-                # stop when each sentence is finished
-                if unfinished_sequences.max() == 0:
-                    this_peer_finished = True
-
-            # stop if we exceed the maximum length
-            if stopping_criteria(input_ids, scores):
-                this_peer_finished = True
-
-            if this_peer_finished and not synced_gpus:
-                break
-
-        if streamer is not None:
-            streamer.end()
-
-        if return_dict_in_generate:
-            if self.config.is_encoder_decoder:
-                return GreedySearchEncoderDecoderOutput(
-                    sequences=input_ids,
-                    scores=scores,
-                    encoder_attentions=encoder_attentions,
-                    encoder_hidden_states=encoder_hidden_states,
-                    decoder_attentions=decoder_attentions,
-                    cross_attentions=cross_attentions,
-                    decoder_hidden_states=decoder_hidden_states,
-                )
-            else:
-                return GreedySearchDecoderOnlyOutput(
-                    sequences=input_ids,
-                    scores=scores,
-                    attentions=decoder_attentions,
-                    hidden_states=decoder_hidden_states,
-                )
-        else:
-            return input_ids
-        
-
-
-
-# Just in case we need to use the prunning in the future
-# FIRST DIFFERENT BATCH SIZE 
-# if i == 1:  # if it is the first layer
-#     lm_logits = self.lm_head(hidden_states)
-#     k = 200  
-#     _, top_k_indices = torch.topk(lm_logits, k, dim=-1, largest=True, sorted=True)
-
-#     b_size = hidden_states.size(0)
-#     top_k_indices = top_k_indices.view(b_size, -1) 
-    
-#     selected_weights = torch.gather(self.lm_head.weight.expand(b_size, -1, -1), 
-#                                     1, top_k_indices.unsqueeze(-1).expand(-1, -1, self.lm_head.weight.size(1)))
-    
-#     self.selected_weights = selected_weights
-
-# else:  # For all the other layers
-#     # Use the selected_weights stored from the first layer
-#     # Assuming hidden_states are [batch_size, seq_length, d_model]
-#     # and selected_weights are [batch_size, top_k, d_model]
-#     lm_logits = torch.bmm(hidden_states, self.selected_weights.transpose(1, 2))
-
-
-# Sanity check
-# if i == 2: 
-#     # With prunning
-#     start1 = time.perf_counter()
-#     lm_logits_prunned = torch.nn.functional.linear(_hidden_states, selected_weights)
-#     end1 = time.perf_counter()
-#     timetaken1 = end1 - start1
-
-#     # WITHOUT PRUNNING
-#     start2 = time.perf_counter()
-#     lm_logits_not_pruned = lm_head(_hidden_states)
-#     lm_logits_not_pruned = lm_logits_not_pruned[:, :, self.top_k_indices]
-#     end2 = time.perf_counter()
-#     timetaken2 = end2 - start2
-
-
-#     # Convert PyTorch tensors to NumPy arrays
-#     pruned_np = lm_logits_prunned.cpu().detach().numpy()
-#     not_pruned_np = lm_logits_not_pruned.cpu().detach().numpy()
-
-#     # Check if the arrays are close
-#     if not np.allclose(pruned_np, not_pruned_np, atol=1e-5): # TO DO: Figure out why when removing atol here you get different logits in some cases. 
-#         # Find where they are not close
-#         diff_mask = np.isclose(pruned_np, not_pruned_np) == False
-#         differing_indices = np.where(diff_mask)
-#         # Extract the differing values
-#         differing_values_pruned = pruned_np[diff_mask]
-#         differing_values_not_pruned = not_pruned_np[diff_mask]
-        
-#         # Print the differing values and their indices
-#         print("Differing indices:", differing_indices)
-#         print("Values in pruned logits at differing indices:", differing_values_pruned)
-#         print("Values in not pruned logits at differing indices:", differing_values_not_pruned)
-        
-#         # Optionally, raise an exception or handle the discrepancy as needed
-#         raise ValueError("The pruned logits are not the same as the non-pruned logits. Differences found at indices.")
-
-
-#     #assert np.allclose(lm_logits_prunned.cpu().detach().numpy(), lm_logits_not_pruned.cpu().detach().numpy()), "The prunned logits are not the same as the non-prunned logits" + str(lm_logits_prunned) + str(lm_logits_not_pruned)
-#     assert timetaken1 < timetaken2, "The prunned logits are taking longer to compute than the non-prunned logits " + str(timetaken1) + " " + str(timetaken2)
-
