@@ -615,6 +615,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # evaluation metrics could be differ from evaluation during training
         # refer to https://discuss.huggingface.co/t/evaluation-results-metric-during-training-is-different-from-the-evaluation-results-at-the-end/15401/3
         metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
+
         # print("eval_runtime", metrics["eval_runtime"])
         # wandb.log({"eval_block_avg": metrics["eval_block_avg"]})
         # wandb.log({"eval_exact_match": metrics["eval_exact_match"]})
@@ -661,7 +662,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
 
 if __name__ == "__main__":
-    os.environ["WANDB_DISABLED"] = "true"
+    os.environ["WANDB_DISABLED"] = "false"
 
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -680,23 +681,33 @@ if __name__ == "__main__":
             else DeployT5ForConditionalGeneration
     trainer_cls = QATrainer
 
-    wandb.login()
+    exit_min_layer_list = [17, 6, 3]
+    average_exit_block_list = []
+    for layer in exit_min_layer_list:
+        additional_args.exit_min_layer = layer
+        wandb.login()
 
-    wandb.init(
-            # set the wandb project where this run will be logged
-            project="contrastive_decoding",
-            entity="uva24",
-            # track hyperparameters and run metadata
-            config={
-                "dataset": data_args.dataset_name,
-                "model": model_args.model_name_or_path, 
-                "exit_conf_type": additional_args.exit_conf_type,
-                "exit_conf_threshold": additional_args.exit_conf_threshold,
-                "exit_min_layer": additional_args.exit_min_layer,
-                },
-            # mode="disabled" if TESTING else "online",
-            )
+        wandb.init(
+                # set the wandb project where this run will be logged
+                project="contrastive_decoding",
+                entity="uva24",
+                # track hyperparameters and run metadata
+                config={
+                    "dataset": data_args.dataset_name,
+                    "model": model_args.model_name_or_path, 
+                    "exit_conf_type": additional_args.exit_conf_type,
+                    "exit_conf_threshold": additional_args.exit_conf_threshold,
+                    "exit_min_layer": additional_args.exit_min_layer,
+                    },
+                # mode="disabled" if TESTING else "online",
+                )
+
+        main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)
+
+        # average_exit_block_list.append(average_exit_block)
+
+        wandb.finish()
+            
     
-    main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)
 
-    wandb.finish()
+    

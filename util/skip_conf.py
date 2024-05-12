@@ -152,7 +152,7 @@ def reweight_contrastive_confidence(
     ## calculate current layer probabilities
     probits_exp = torch.softmax(lm_logits, dim=-1).squeeze_()
     prev_probits[layer_exp] = probits_exp
-   
+    # print("prev_probits", prev_probits) 
     # probs_exp = torch.softmax(logits_at, dim=-1)
     max_probs_exp = torch.max(probits_exp)
 
@@ -198,6 +198,8 @@ def JDS_contrastive_confidence(
     ## calculate current layer probabilities
     probits_exp = torch.softmax(lm_logits, dim=-1).squeeze_()
     prev_probits[layer_exp] = probits_exp
+    # print("prev_probits", prev_probits) 
+
    
     # probs_exp = torch.softmax(logits_at, dim=-1)
     max_probs_exp = torch.max(probits_exp)

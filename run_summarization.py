@@ -65,6 +65,8 @@ from util import (
     update_autoconfig,
 )
 
+import wandb
+
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.28.0.dev0")
 # require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/summarization/requirements.txt")
@@ -556,7 +558,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
 
 if __name__ == "__main__":
-    os.environ["WANDB_DISABLED"] = "true"
+    os.environ["WANDB_DISABLED"] = "false"
     
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -582,4 +584,23 @@ if __name__ == "__main__":
 
     trainer_cls = SumTrainer
 
+    wandb.login()
+
+    wandb.init(
+            # set the wandb project where this run will be logged
+            project="summarization_cd",
+            entity="uva24",
+            # track hyperparameters and run metadata
+            config={
+                "dataset": data_args.dataset_name,
+                "model": model_args.model_name_or_path, 
+                "exit_conf_type": additional_args.exit_conf_type,
+                "exit_conf_threshold": additional_args.exit_conf_threshold,
+                "exit_min_layer": additional_args.exit_min_layer,
+                },
+            # mode="disabled" if TESTING else "online",
+            )
+
     main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)
+
+    wandb.finish()

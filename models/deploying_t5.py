@@ -1031,8 +1031,11 @@ class DeployT5Stack(T5Stack):
                                 pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
                             )
                         
+                        # print("prev_probits", prev_probits)
+
                         if not skip_mask: self.block_op[i] += 1                    
                         if skip_mask: 
+                            # print("Layer: ", i) 
                             self.lm_logits = lm_logits # This is where the logits are sent to do the predictions.
                             plot = False
 
