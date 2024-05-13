@@ -30,7 +30,7 @@
 
 
 CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
-    --model_name_or_path t5-large \
+    --model_name_or_path jvelja/t5-squad \
     --do_eval \
     --dataset_name squad \
     --context_column context \
@@ -48,7 +48,8 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     --exit_conf_threshold 1.1 \
     --exit_min_layer 2 \
     --include_inputs_for_metrics True \
-    #--max_eval_samples 10 \
+    --max_eval_samples 100 \
+    --use_auth_token True \
    
 
     # FREE

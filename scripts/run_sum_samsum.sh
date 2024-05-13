@@ -1,18 +1,18 @@
-CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --nproc_per_node=2 \
-    run_summarization.py \
-    --model_name_or_path t5-large \
-    --do_train \
-    --do_eval \
-    --dataset_name samsum \
-    --output_dir ./save/samsum_t5_large/ \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 32 \
-    --overwrite_output_dir \
-    --predict_with_generate \
-    --source_prefix "summarize: " \
-    --save_steps 5475 \
-    --learning_rate 1e-4 \
-    --num_train_epochs 20 \
+# CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --nproc_per_node=2 \
+#     run_summarization.py \
+#     --model_name_or_path t5-large \
+#     --do_train \
+#     --do_eval \
+#     --dataset_name samsum \
+#     --output_dir ./save/samsum_t5_large/ \
+#     --per_device_train_batch_size 4 \
+#     --per_device_eval_batch_size 32 \
+#     --overwrite_output_dir \
+#     --predict_with_generate \
+#     --source_prefix "summarize: " \
+#     --save_steps 5475 \
+#     --learning_rate 1e-4 \
+#     --num_train_epochs 20 \
 
     # FREE
     # --output_hidden_states_decoder True \
@@ -34,18 +34,24 @@ CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --nproc_per_node=2 \
     # --lora_target_modules 'q' 'k' 'v' 'o' 'wi' 'wo' \
 
 
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.run --nproc_per_node=1 \
-    run_summarization.py \
-    --model_name_or_path ./save/samsum_t5_large/ \
+CUDA_VISIBLE_DEVICES=0 python -m run_summarization \
+    --model_name_or_path google-t5/t5-large \
     --do_eval \
     --dataset_name samsum \
-    --output_dir ./save/samsum_t5_large/ \
+    --output_dir ./save/samsum_t5-large/ \
     --per_device_eval_batch_size 1 \
     --deploy_scenario True \
-    --use_synchronize True \
+    --use_synchronize False \
     --overwrite_output_dir \
     --predict_with_generate \
     --source_prefix "summarize: " \
+    --use_early_exit True \
+    --exit_conf_type JDS_contrastive_confidence \
+    --exit_conf_threshold 1.1 \
+    --exit_min_layer 2 \
+    --max_eval_samples 10 \
+    --include_inputs_for_metrics True \
+    --use_auth_token True \
 
     # FREE
     # --use_shallow_deep True \

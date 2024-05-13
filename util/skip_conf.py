@@ -1,23 +1,25 @@
 import numpy as np
 import torch
 import torch.nn as nn 
-
+import matplotlib.pyplot as plt
+import seaborn as sns
 from transformers import AutoConfig
 from copy import deepcopy
-import datetime
+
 
 class JSD(nn.Module):
     def __init__(self):
         super(JSD, self).__init__()
         self.kl = nn.KLDivLoss(reduction='batchmean', log_target=True)
 
-    def forward(self, p: torch.tensor, q: torch.tensor):
+    def forward(self, p: torch.Tensor, q: torch.Tensor):
+        # Move p and q to CPU and ensure they are in float64 for high precision calculation
+        p, q = p.cpu().double(), q.cpu().double()
         p, q = p.view(-1, p.size(-1)), q.view(-1, q.size(-1))
+        
         m = (0.5 * (p + q)).log()
         return 0.5 * (self.kl(m, p.log()) + self.kl(m, q.log()))
-
-import matplotlib.pyplot as plt
-import seaborn as sns
+    
 
 def plot_probits(probits, title='Probability Distribution Over Large Vocabulary', layer_exp=None, layer_am=None):
     """
@@ -221,7 +223,6 @@ def JDS_contrastive_confidence(
 
     # only consider jsds between current and current // 2 layers
     jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in np.arange(stop = layer_exp + 1, start=1)}
-
     # get the probits with the maximum jsd
     max_jsd_layer = max(jsds, key=jsds.get)
     probits_am = prev_probits[max_jsd_layer]

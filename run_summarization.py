@@ -422,8 +422,11 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
         return preds, labels
 
-    def compute_metrics(eval_preds):
-        preds, labels = eval_preds
+    def compute_metrics(eval_preds, compute_metrics=True):
+        if compute_metrics:
+            preds, labels, inputs = eval_preds
+        else:
+            preds, labels = eval_preds
         if isinstance(preds, tuple):
             preds = preds[0]
             
@@ -502,7 +505,13 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
     results = {}
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate(metric_key_prefix="eval")
+        if training_args.include_inputs_for_metrics:
+            output = trainer.evaluate(metric_key_prefix="eval")
+            metrics = output.metrics
+            
+        else:
+            metrics = trainer.evaluate(metric_key_prefix="eval")
+        
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 

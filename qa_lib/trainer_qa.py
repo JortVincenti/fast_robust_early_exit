@@ -58,7 +58,7 @@ class QATrainer(Seq2SeqTrainer):
         
         descriptive = True
         if descriptive:
-            self.tokenizer = AutoTokenizer.from_pretrained('t5-base')
+            self.tokenizer = AutoTokenizer.from_pretrained('google-t5/t5-large')
 
             
     def evaluate(
