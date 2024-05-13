@@ -184,6 +184,7 @@ def JDS_contrastive_confidence(
     alpha: float = None,
     hidden_states: torch.Tensor = None,
     classifier: torch.nn.Linear = None,
+    return_jsds=True,
 ):
     """
     Checking confidence with JDS contrastive decoding.
@@ -193,7 +194,6 @@ def JDS_contrastive_confidence(
     """
     # start = datetime.datetime.now()
     assert lm_logits is not None
-
 
     ## calculate current layer probabilities
     probits_exp = torch.softmax(lm_logits, dim=-1).squeeze_()
@@ -220,13 +220,11 @@ def JDS_contrastive_confidence(
     #jsds = {k: jsd(probits_exp, v) for k, v in prev_probits.items()}
 
     # only consider jsds between current and current // 2 layers
-    jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in [layer_exp, layer_exp // 2]}
+    jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in np.arange(stop = layer_exp + 1, start=1)}
 
     # get the probits with the maximum jsd
     max_jsd_layer = max(jsds, key=jsds.get)
     probits_am = prev_probits[max_jsd_layer]
-
-    #print("Picking the layer with the maximum JSD", max_jsd_layer)
 
     # for v in prev_probits.values():
     #     probs_am = v
@@ -256,7 +254,10 @@ def JDS_contrastive_confidence(
     # end = datetime.datetime.now()
     # print("Time taken for contrastive confidence", end-start)
     
-    return (top_2[..., 0] - top_2[..., 1]).squeeze()
+    if return_jsds:
+        return (top_2[..., 0] - top_2[..., 1]).squeeze(), jsds
+    else:
+        return (top_2[..., 0] - top_2[..., 1]).squeeze()
 
 
 def get_confidence_class(key):
@@ -286,6 +287,7 @@ def get_skip_mask_cd(
     alpha: float = 0.1,
     adapt_threshold: float = None,
     return_conf=False,
+    return_jsds=True,
 ):
 
     assert config.exit_conf_type is not None or config.shallow2deep_conf_type is not None
@@ -308,15 +310,39 @@ def get_skip_mask_cd(
 
     # print("Inside get_skip_mask_cd")
 
-    conf = conf_measure(
-        lm_logits,
-        layer_exp = layer_exp, 
-        prev_probits = prev_probits, 
-        layer_am = layer_am,
-        alpha = alpha,
-        hidden_states = hidden_states,
-        classifier = classifier,
-    )
+    if key == 'JDS_contrastive_confidence' and not return_jsds:
+        conf = conf_measure(
+            lm_logits,
+            layer_exp = layer_exp, 
+            prev_probits = prev_probits, 
+            layer_am = layer_am,
+            alpha = alpha,
+            hidden_states = hidden_states,
+            classifier = classifier,
+        )
+    elif key == 'JDS_contrastive_confidence' and return_jsds:
+        conf, jsds = conf_measure(
+            lm_logits,
+            layer_exp = layer_exp, 
+            prev_probits = prev_probits, 
+            layer_am = layer_am,
+            alpha = alpha,
+            hidden_states = hidden_states,
+            classifier = classifier,
+            return_jsds = return_jsds,
+        )
+    else:
+        conf = conf_measure(
+            lm_logits,
+            layer_exp = layer_exp, 
+            prev_probits = prev_probits, 
+            layer_am = layer_am,
+            alpha = alpha,
+            hidden_states = hidden_states,
+            classifier = classifier,
+        )
+    
+
 
     # print("confidence return", conf)
 
@@ -327,11 +353,16 @@ def get_skip_mask_cd(
 
     # print("mask", mask)
     # print("mask shape", mask.shape)
+
+    if return_jsds:
+        return mask.item(), jsds
     
     if not return_conf:
         return mask.item()  # False (0) and True (1) denote keep and exit
     else:
         return mask.item(), conf.item()
+    
+
 
 def get_skip_mask(
     logits: torch.Tensor = None,
