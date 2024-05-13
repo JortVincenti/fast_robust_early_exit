@@ -1048,7 +1048,7 @@ class DeployT5Stack(T5Stack):
                         
                         plot = True
 
-                        if plot and len(jsds) >= 11 : # When we have all the jdss values, we can use them to check jsds between layers
+                        if plot and len(jsds) >= 23 : # When we have all the jdss values, we can use them to check jsds between layers
 
                             print("JSDS: ", jsds)
 
