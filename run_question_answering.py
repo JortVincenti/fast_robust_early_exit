@@ -19,7 +19,7 @@ Fine-tuning the library's seq2seq models for question answering using the 🤗 S
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
 
-TESTING = True
+TESTING = False
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -662,7 +662,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
 
 if __name__ == "__main__":
-    os.environ["WANDB_DISABLED"] = "true"
+    # os.environ["WANDB_DISABLED"] = "true"
 
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -681,7 +681,7 @@ if __name__ == "__main__":
             else DeployT5ForConditionalGeneration
     trainer_cls = QATrainer
 
-    exit_min_layer_list = [17, 6, 3]
+    exit_min_layer_list = [1]
     average_exit_block_list = []
     for layer in exit_min_layer_list:
         additional_args.exit_min_layer = layer
@@ -689,7 +689,7 @@ if __name__ == "__main__":
 
         wandb.init(
                 # set the wandb project where this run will be logged
-                project="contrastive_decoding",
+                project="fine-tuned-qa-models",
                 entity="uva24",
                 # track hyperparameters and run metadata
                 config={
@@ -699,7 +699,7 @@ if __name__ == "__main__":
                     "exit_conf_threshold": additional_args.exit_conf_threshold,
                     "exit_min_layer": additional_args.exit_min_layer,
                     },
-                # mode="disabled" if TESTING else "online",
+                mode="disabled" if TESTING else "online",
                 )
 
         main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)

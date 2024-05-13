@@ -588,7 +588,7 @@ if __name__ == "__main__":
 
     wandb.init(
             # set the wandb project where this run will be logged
-            project="summarization_cd",
+            project="fine-tuned-sum-models",
             entity="uva24",
             # track hyperparameters and run metadata
             config={
