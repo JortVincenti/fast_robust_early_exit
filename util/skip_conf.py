@@ -222,7 +222,7 @@ def JDS_contrastive_confidence(
     #jsds = {k: jsd(probits_exp, v) for k, v in prev_probits.items()}
 
     # only consider jsds between current and current // 2 layers
-    jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in np.arange(stop = layer_exp + 1, start=1)}
+    jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in np.arange(stop = layer_exp + 1, start=2)}
     # get the probits with the maximum jsd
     max_jsd_layer = max(jsds, key=jsds.get)
     probits_am = prev_probits[max_jsd_layer]
