@@ -1,0 +1,167 @@
+05/13/2024 13:43:05 - WARNING - __main__ - Process rank: -1, device: mps, n_gpu: 0distributed training: False, 16-bits training: False
+05/13/2024 13:43:05 - INFO - __main__ - Training/evaluation parameters Seq2SeqTrainingArguments(
+_n_gpu=0,
+adafactor=False,
+adam_beta1=0.9,
+adam_beta2=0.999,
+adam_epsilon=1e-08,
+auto_find_batch_size=False,
+bf16=False,
+bf16_full_eval=False,
+data_seed=None,
+dataloader_drop_last=False,
+dataloader_num_workers=0,
+dataloader_pin_memory=True,
+ddp_bucket_cap_mb=None,
+ddp_find_unused_parameters=None,
+ddp_timeout=1800,
+debug=[],
+deepspeed=None,
+disable_tqdm=False,
+do_eval=True,
+do_predict=False,
+do_train=False,
+eval_accumulation_steps=None,
+eval_delay=0,
+eval_steps=None,
+evaluation_strategy=no,
+fp16=False,
+fp16_backend=auto,
+fp16_full_eval=False,
+fp16_opt_level=O1,
+fsdp=[],
+fsdp_config={'fsdp_min_num_params': 0, 'xla': False, 'xla_fsdp_grad_ckpt': False},
+fsdp_min_num_params=0,
+fsdp_transformer_layer_cls_to_wrap=None,
+full_determinism=False,
+generation_config=None,
+generation_max_length=None,
+generation_num_beams=None,
+gradient_accumulation_steps=1,
+gradient_checkpointing=False,
+greater_is_better=None,
+group_by_length=False,
+half_precision_backend=auto,
+hub_model_id=None,
+hub_private_repo=False,
+hub_strategy=every_save,
+hub_token=<HUB_TOKEN>,
+ignore_data_skip=False,
+include_inputs_for_metrics=True,
+jit_mode_eval=False,
+label_names=None,
+label_smoothing_factor=0.0,
+learning_rate=5e-05,
+length_column_name=length,
+load_best_model_at_end=False,
+local_rank=-1,
+log_level=passive,
+log_level_replica=warning,
+log_on_each_node=True,
+logging_dir=./save/squad_t5-large/runs/May13_13-43-01_sp-byods-145-109-52-67.wireless.uva.nl,
+logging_first_step=False,
+logging_nan_inf_filter=True,
+logging_steps=500,
+logging_strategy=steps,
+lr_scheduler_type=linear,
+max_grad_norm=1.0,
+max_steps=-1,
+metric_for_best_model=None,
+mp_parameters=,
+no_cuda=False,
+num_train_epochs=3.0,
+optim=adamw_hf,
+optim_args=None,
+output_dir=./save/squad_t5-large/,
+overwrite_output_dir=True,
+past_index=-1,
+per_device_eval_batch_size=1,
+per_device_train_batch_size=8,
+predict_with_generate=True,
+prediction_loss_only=False,
+push_to_hub=False,
+push_to_hub_model_id=None,
+push_to_hub_organization=None,
+push_to_hub_token=<PUSH_TO_HUB_TOKEN>,
+ray_scope=last,
+remove_unused_columns=True,
+report_to=[],
+resume_from_checkpoint=None,
+run_name=./save/squad_t5-large/,
+save_on_each_node=False,
+save_safetensors=False,
+save_steps=500,
+save_strategy=steps,
+save_total_limit=None,
+seed=42,
+sharded_ddp=[],
+skip_memory_metrics=True,
+sortish_sampler=False,
+tf32=None,
+torch_compile=False,
+torch_compile_backend=None,
+torch_compile_mode=None,
+torchdynamo=None,
+tpu_metrics_debug=False,
+tpu_num_cores=None,
+use_ipex=False,
+use_legacy_prediction_loop=False,
+use_mps_device=False,
+warmup_ratio=0.0,
+warmup_steps=0,
+weight_decay=0.0,
+xpu_backend=None,
+)
+05/13/2024 13:43:12 - INFO - datasets.builder - Overwrite dataset info from restored data version if exists.
+05/13/2024 13:43:12 - INFO - datasets.info - Loading Dataset info from /Users/joanvelja/.cache/huggingface/datasets/squad/plain_text/0.0.0/7b6d24c440a36b6815f21b70d25016731768db1f
+05/13/2024 13:43:12 - INFO - datasets.builder - Found cached dataset squad (/Users/joanvelja/.cache/huggingface/datasets/squad/plain_text/0.0.0/7b6d24c440a36b6815f21b70d25016731768db1f)
+05/13/2024 13:43:12 - INFO - datasets.info - Loading Dataset info from /Users/joanvelja/.cache/huggingface/datasets/squad/plain_text/0.0.0/7b6d24c440a36b6815f21b70d25016731768db1f
+05/13/2024 13:43:25 - INFO - datasets.arrow_dataset - Loading cached processed dataset at /Users/joanvelja/.cache/huggingface/datasets/squad/plain_text/0.0.0/7b6d24c440a36b6815f21b70d25016731768db1f/cache-9317cdc712e6d634.arrow
+05/13/2024 13:43:27 - INFO - __main__ - *** Evaluate ***
+JSDS:  {1: tensor(0.6920, device='mps:0'), 2: tensor(0.6899, device='mps:0'), 3: tensor(0.6899, device='mps:0'), 4: tensor(0.6899, device='mps:0'), 5: tensor(0.6900, device='mps:0'), 6: tensor(0.6899, device='mps:0'), 7: tensor(0.6899, device='mps:0'), 8: tensor(0.6899, device='mps:0'), 9: tensor(0.6899, device='mps:0'), 10: tensor(0.6898, device='mps:0'), 11: tensor(0.6896, device='mps:0'), 12: tensor(0.6895, device='mps:0'), 13: tensor(0.6894, device='mps:0'), 14: tensor(0.6890, device='mps:0'), 15: tensor(0.6885, device='mps:0'), 16: tensor(0.6880, device='mps:0'), 17: tensor(0.6875, device='mps:0'), 18: tensor(0.6832, device='mps:0'), 19: tensor(0.6696, device='mps:0'), 20: tensor(0.6141, device='mps:0'), 21: tensor(0.3489, device='mps:0'), 22: tensor(0.0088, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  Denver
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6928, device='mps:0'), 3: tensor(0.6885, device='mps:0'), 4: tensor(0.6863, device='mps:0'), 5: tensor(0.6868, device='mps:0'), 6: tensor(0.6833, device='mps:0'), 7: tensor(0.6853, device='mps:0'), 8: tensor(0.6873, device='mps:0'), 9: tensor(0.6853, device='mps:0'), 10: tensor(0.6830, device='mps:0'), 11: tensor(0.6817, device='mps:0'), 12: tensor(0.6832, device='mps:0'), 13: tensor(0.6844, device='mps:0'), 14: tensor(0.6859, device='mps:0'), 15: tensor(0.6838, device='mps:0'), 16: tensor(0.6841, device='mps:0'), 17: tensor(0.6697, device='mps:0'), 18: tensor(0.5459, device='mps:0'), 19: tensor(0.3370, device='mps:0'), 20: tensor(0.1047, device='mps:0'), 21: tensor(0.0053, device='mps:0'), 22: tensor(0.0003, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  Bro
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6931, device='mps:0'), 3: tensor(0.6919, device='mps:0'), 4: tensor(0.6848, device='mps:0'), 5: tensor(0.6852, device='mps:0'), 6: tensor(0.6826, device='mps:0'), 7: tensor(0.6799, device='mps:0'), 8: tensor(0.6785, device='mps:0'), 9: tensor(0.6762, device='mps:0'), 10: tensor(0.6693, device='mps:0'), 11: tensor(0.6554, device='mps:0'), 12: tensor(0.6462, device='mps:0'), 13: tensor(0.6415, device='mps:0'), 14: tensor(0.5832, device='mps:0'), 15: tensor(0.5674, device='mps:0'), 16: tensor(0.3202, device='mps:0'), 17: tensor(0.1844, device='mps:0'), 18: tensor(0.0270, device='mps:0'), 19: tensor(0.0044, device='mps:0'), 20: tensor(0.0006, device='mps:0'), 21: tensor(0.0002, device='mps:0'), 22: tensor(2.9207e-05, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  n
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6922, device='mps:0'), 3: tensor(0.6889, device='mps:0'), 4: tensor(0.6869, device='mps:0'), 5: tensor(0.6886, device='mps:0'), 6: tensor(0.6863, device='mps:0'), 7: tensor(0.6838, device='mps:0'), 8: tensor(0.6809, device='mps:0'), 9: tensor(0.6739, device='mps:0'), 10: tensor(0.6648, device='mps:0'), 11: tensor(0.6562, device='mps:0'), 12: tensor(0.6404, device='mps:0'), 13: tensor(0.6327, device='mps:0'), 14: tensor(0.6076, device='mps:0'), 15: tensor(0.6061, device='mps:0'), 16: tensor(0.5993, device='mps:0'), 17: tensor(0.3862, device='mps:0'), 18: tensor(0.1773, device='mps:0'), 19: tensor(0.0715, device='mps:0'), 20: tensor(0.0229, device='mps:0'), 21: tensor(0.0026, device='mps:0'), 22: tensor(0.0004, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  co
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6929, device='mps:0'), 3: tensor(0.6886, device='mps:0'), 4: tensor(0.6750, device='mps:0'), 5: tensor(0.6695, device='mps:0'), 6: tensor(0.6450, device='mps:0'), 7: tensor(0.6047, device='mps:0'), 8: tensor(0.5177, device='mps:0'), 9: tensor(0.3993, device='mps:0'), 10: tensor(0.1739, device='mps:0'), 11: tensor(0.0415, device='mps:0'), 12: tensor(0.0193, device='mps:0'), 13: tensor(0.0050, device='mps:0'), 14: tensor(0.0004, device='mps:0'), 15: tensor(0.0001, device='mps:0'), 16: tensor(7.6903e-05, device='mps:0'), 17: tensor(1.2754e-05, device='mps:0'), 18: tensor(6.0040e-06, device='mps:0'), 19: tensor(5.2218e-06, device='mps:0'), 20: tensor(5.6232e-06, device='mps:0'), 21: tensor(2.9497e-06, device='mps:0'), 22: tensor(6.4997e-07, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  s
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6930, device='mps:0'), 3: tensor(0.6916, device='mps:0'), 4: tensor(0.6705, device='mps:0'), 5: tensor(0.6612, device='mps:0'), 6: tensor(0.6267, device='mps:0'), 7: tensor(0.6035, device='mps:0'), 8: tensor(0.5865, device='mps:0'), 9: tensor(0.5167, device='mps:0'), 10: tensor(0.4465, device='mps:0'), 11: tensor(0.2965, device='mps:0'), 12: tensor(0.1991, device='mps:0'), 13: tensor(0.0880, device='mps:0'), 14: tensor(0.0488, device='mps:0'), 15: tensor(0.0234, device='mps:0'), 16: tensor(0.0010, device='mps:0'), 17: tensor(3.4297e-06, device='mps:0'), 18: tensor(5.3217e-06, device='mps:0'), 19: tensor(1.2204e-05, device='mps:0'), 20: tensor(1.1516e-05, device='mps:0'), 21: tensor(9.1715e-06, device='mps:0'), 22: tensor(4.9142e-06, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  </s>
+Layer:  23
+question: Which NFL team represented the AFC at Super Bowl 50? context: Super Bowl 50 was an American football game to determine the champion of the National Football League (NFL) for the 2015 season. The American Football Conference (AFC) champion Denver Broncos defeated the National Football Conference (NFC) champion Carolina Panthers 24–10 to earn their third Super Bowl title. The game was played on February 7, 2016, at Levi's Stadium in the San Francisco Bay Area at Santa Clara, California. As this was the 50th Super Bowl, the league emphasized the "golden anniversary" with various gold-themed initiatives, as well as temporarily suspending the tradition of naming each Super Bowl game with Roman numerals (under which the game would have been known as "Super Bowl L"), so that the logo could prominently feature the Arabic numerals 50.
+-END CONTEXT-
+JSDS:  {1: tensor(0.6927, device='mps:0'), 2: tensor(0.6915, device='mps:0'), 3: tensor(0.6916, device='mps:0'), 4: tensor(0.6915, device='mps:0'), 5: tensor(0.6916, device='mps:0'), 6: tensor(0.6915, device='mps:0'), 7: tensor(0.6915, device='mps:0'), 8: tensor(0.6915, device='mps:0'), 9: tensor(0.6915, device='mps:0'), 10: tensor(0.6914, device='mps:0'), 11: tensor(0.6913, device='mps:0'), 12: tensor(0.6913, device='mps:0'), 13: tensor(0.6912, device='mps:0'), 14: tensor(0.6909, device='mps:0'), 15: tensor(0.6907, device='mps:0'), 16: tensor(0.6903, device='mps:0'), 17: tensor(0.6895, device='mps:0'), 18: tensor(0.6825, device='mps:0'), 19: tensor(0.6428, device='mps:0'), 20: tensor(0.4654, device='mps:0'), 21: tensor(0.0935, device='mps:0'), 22: tensor(0.0019, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  Carolina
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6929, device='mps:0'), 3: tensor(0.6887, device='mps:0'), 4: tensor(0.6839, device='mps:0'), 5: tensor(0.6822, device='mps:0'), 6: tensor(0.6764, device='mps:0'), 7: tensor(0.6673, device='mps:0'), 8: tensor(0.6633, device='mps:0'), 9: tensor(0.6525, device='mps:0'), 10: tensor(0.6486, device='mps:0'), 11: tensor(0.6209, device='mps:0'), 12: tensor(0.5964, device='mps:0'), 13: tensor(0.6139, device='mps:0'), 14: tensor(0.6329, device='mps:0'), 15: tensor(0.6039, device='mps:0'), 16: tensor(0.5900, device='mps:0'), 17: tensor(0.4793, device='mps:0'), 18: tensor(0.1259, device='mps:0'), 19: tensor(0.0621, device='mps:0'), 20: tensor(0.0214, device='mps:0'), 21: tensor(0.0016, device='mps:0'), 22: tensor(0.0003, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  Panther
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6931, device='mps:0'), 3: tensor(0.6924, device='mps:0'), 4: tensor(0.6733, device='mps:0'), 5: tensor(0.6349, device='mps:0'), 6: tensor(0.5661, device='mps:0'), 7: tensor(0.5117, device='mps:0'), 8: tensor(0.3963, device='mps:0'), 9: tensor(0.2476, device='mps:0'), 10: tensor(0.0719, device='mps:0'), 11: tensor(0.0133, device='mps:0'), 12: tensor(0.0056, device='mps:0'), 13: tensor(0.0010, device='mps:0'), 14: tensor(8.4100e-05, device='mps:0'), 15: tensor(5.1450e-05, device='mps:0'), 16: tensor(2.8006e-05, device='mps:0'), 17: tensor(8.7089e-06, device='mps:0'), 18: tensor(6.1782e-06, device='mps:0'), 19: tensor(5.4137e-06, device='mps:0'), 20: tensor(5.7497e-06, device='mps:0'), 21: tensor(3.8100e-06, device='mps:0'), 22: tensor(1.1254e-06, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  s
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6929, device='mps:0'), 3: tensor(0.6872, device='mps:0'), 4: tensor(0.6522, device='mps:0'), 5: tensor(0.6482, device='mps:0'), 6: tensor(0.5905, device='mps:0'), 7: tensor(0.5626, device='mps:0'), 8: tensor(0.5451, device='mps:0'), 9: tensor(0.4754, device='mps:0'), 10: tensor(0.3976, device='mps:0'), 11: tensor(0.2511, device='mps:0'), 12: tensor(0.1610, device='mps:0'), 13: tensor(0.0588, device='mps:0'), 14: tensor(0.0263, device='mps:0'), 15: tensor(0.0127, device='mps:0'), 16: tensor(0.0005, device='mps:0'), 17: tensor(2.5142e-06, device='mps:0'), 18: tensor(4.5083e-06, device='mps:0'), 19: tensor(9.2711e-06, device='mps:0'), 20: tensor(8.9189e-06, device='mps:0'), 21: tensor(6.8083e-06, device='mps:0'), 22: tensor(3.1226e-06, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  </s>
+Layer:  23
+question: Which NFL team represented the NFC at Super Bowl 50? context: Super Bowl 50 was an American football game to determine the champion of the National Football League (NFL) for the 2015 season. The American Football Conference (AFC) champion Denver Broncos defeated the National Football Conference (NFC) champion Carolina Panthers 24–10 to earn their third Super Bowl title. The game was played on February 7, 2016, at Levi's Stadium in the San Francisco Bay Area at Santa Clara, California. As this was the 50th Super Bowl, the league emphasized the "golden anniversary" with various gold-themed initiatives, as well as temporarily suspending the tradition of naming each Super Bowl game with Roman numerals (under which the game would have been known as "Super Bowl L"), so that the logo could prominently feature the Arabic numerals 50.
+-END CONTEXT-
+JSDS:  {1: tensor(0.6846, device='mps:0'), 2: tensor(0.6630, device='mps:0'), 3: tensor(0.6626, device='mps:0'), 4: tensor(0.6634, device='mps:0'), 5: tensor(0.6647, device='mps:0'), 6: tensor(0.6650, device='mps:0'), 7: tensor(0.6651, device='mps:0'), 8: tensor(0.6647, device='mps:0'), 9: tensor(0.6645, device='mps:0'), 10: tensor(0.6642, device='mps:0'), 11: tensor(0.6633, device='mps:0'), 12: tensor(0.6622, device='mps:0'), 13: tensor(0.6610, device='mps:0'), 14: tensor(0.6593, device='mps:0'), 15: tensor(0.6575, device='mps:0'), 16: tensor(0.6550, device='mps:0'), 17: tensor(0.6518, device='mps:0'), 18: tensor(0.6470, device='mps:0'), 19: tensor(0.6368, device='mps:0'), 20: tensor(0.6096, device='mps:0'), 21: tensor(0.4574, device='mps:0'), 22: tensor(0.2322, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  Levi
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6931, device='mps:0'), 3: tensor(0.6930, device='mps:0'), 4: tensor(0.6912, device='mps:0'), 5: tensor(0.6898, device='mps:0'), 6: tensor(0.6863, device='mps:0'), 7: tensor(0.6758, device='mps:0'), 8: tensor(0.6735, device='mps:0'), 9: tensor(0.6598, device='mps:0'), 10: tensor(0.6521, device='mps:0'), 11: tensor(0.6083, device='mps:0'), 12: tensor(0.5686, device='mps:0'), 13: tensor(0.5508, device='mps:0'), 14: tensor(0.3246, device='mps:0'), 15: tensor(0.2709, device='mps:0'), 16: tensor(0.1933, device='mps:0'), 17: tensor(0.0847, device='mps:0'), 18: tensor(0.0646, device='mps:0'), 19: tensor(0.0014, device='mps:0'), 20: tensor(0.0016, device='mps:0'), 21: tensor(7.3192e-05, device='mps:0'), 22: tensor(8.6490e-05, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  '
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6378, device='mps:0'), 3: tensor(0.6160, device='mps:0'), 4: tensor(0.5969, device='mps:0'), 5: tensor(0.6005, device='mps:0'), 6: tensor(0.5892, device='mps:0'), 7: tensor(0.5682, device='mps:0'), 8: tensor(0.4078, device='mps:0'), 9: tensor(0.3184, device='mps:0'), 10: tensor(0.2262, device='mps:0'), 11: tensor(0.1263, device='mps:0'), 12: tensor(0.1181, device='mps:0'), 13: tensor(0.0761, device='mps:0'), 14: tensor(0.0107, device='mps:0'), 15: tensor(0.0044, device='mps:0'), 16: tensor(0.0027, device='mps:0'), 17: tensor(0.0006, device='mps:0'), 18: tensor(4.2247e-05, device='mps:0'), 19: tensor(7.0482e-06, device='mps:0'), 20: tensor(2.1427e-06, device='mps:0'), 21: tensor(2.7460e-06, device='mps:0'), 22: tensor(5.4455e-06, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  s
+Layer:  23
+JSDS:  {1: tensor(0.6931, device='mps:0'), 2: tensor(0.6923, device='mps:0'), 3: tensor(0.6910, device='mps:0'), 4: tensor(0.6906, device='mps:0'), 5: tensor(0.6888, device='mps:0'), 6: tensor(0.6897, device='mps:0'), 7: tensor(0.6897, device='mps:0'), 8: tensor(0.6879, device='mps:0'), 9: tensor(0.6834, device='mps:0'), 10: tensor(0.6737, device='mps:0'), 11: tensor(0.6413, device='mps:0'), 12: tensor(0.6302, device='mps:0'), 13: tensor(0.6516, device='mps:0'), 14: tensor(0.6501, device='mps:0'), 15: tensor(0.6327, device='mps:0'), 16: tensor(0.6094, device='mps:0'), 17: tensor(0.4622, device='mps:0'), 18: tensor(0.0998, device='mps:0'), 19: tensor(0.0362, device='mps:0'), 20: tensor(0.0116, device='mps:0'), 21: tensor(0.0027, device='mps:0'), 22: tensor(0.0003, device='mps:0'), 23: tensor(0., device='mps:0')}
+Word:  Stadium
+Layer:  23
+JSDS:  

@@ -13,7 +13,6 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
-from util.skip_conf import plot_probits
 from transformers import T5Tokenizer
 
 from transformers.modeling_outputs import (
@@ -1374,6 +1373,19 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
         self.decoder._reset_time_measure()
 
         return encoder_outputs, decoder_outputs
+    
+    @staticmethod
+    def apply_repetition_penalty(logits, input_ids, penalty=1.2):
+        if penalty == 1.0:
+            return logits
+
+        for i in range(input_ids.shape[0]):
+            for token_id in set(input_ids[i].tolist()):
+                if logits[i, token_id] < 0:
+                    logits[i, token_id] *= penalty
+                else:
+                    logits[i, token_id] /= penalty
+        return logits
 
     def greedy_search(
         self,
@@ -1524,6 +1536,8 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
                 self.deploy_time['time_decoder_forward'] += (datetime.datetime.now() - start)
 
             next_token_logits = outputs.logits[:, -1, :]
+
+            #next_token_logits = self.apply_repetition_penalty(next_token_logits, input_ids, penalty=1.2)
 
             # pre-process distribution
             next_tokens_scores = logits_processor(input_ids, next_token_logits)

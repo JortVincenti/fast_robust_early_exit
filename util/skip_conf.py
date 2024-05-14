@@ -7,6 +7,78 @@ from transformers import AutoConfig
 from copy import deepcopy
 
 
+import torch
+
+def informed_choice_no_bumps(jsd_series, window_size=3):
+    """
+    Make an informed choice for the distribution with the highest JSD in the absence of bumps.
+    
+    Parameters:
+    jsd_series (torch.Tensor): A tensor of JSD values over time.
+    window_size (int): The window size for moving average and variance calculations (default is 3).
+    
+    Returns:
+    tuple: The index and value of the chosen distribution.
+    """    
+    # Calculate the moving average
+    if len(jsd_series) <= window_size:
+        return jsd_series.argmax().item(), jsd_series.max().item()
+    
+    moving_avg = torch.nn.functional.avg_pool1d(jsd_series.unsqueeze(0).unsqueeze(0), kernel_size=window_size, stride=1).squeeze()
+    
+    # Manually replicate padding for moving_avg
+    pad_size = (window_size - 1) // 2
+    moving_avg_padded = torch.cat([moving_avg[0].repeat(pad_size), moving_avg, moving_avg[-1].repeat(pad_size)])
+    
+    # Calculate the moving variance
+    moving_var = torch.nn.functional.avg_pool1d((jsd_series.unsqueeze(0).unsqueeze(0) - moving_avg_padded.unsqueeze(0).unsqueeze(0))**2, kernel_size=window_size, stride=1).squeeze()
+    moving_var_padded = torch.cat([moving_var[0].repeat(pad_size), moving_var, moving_var[-1].repeat(pad_size)])
+    
+    # Combine the moving average and variance to make a choice
+    stability_score = moving_avg_padded / (moving_var_padded + 1e-6)
+    
+    # Select the index with the highest stability score
+    chosen_index = stability_score.argmax().item()
+    chosen_value = jsd_series[chosen_index].item()
+    
+    return chosen_index, chosen_value, 0
+
+def detect_and_rank_bumps(jsd_series, threshold=0):
+    """
+    Detect and rank significant bumps in a time-series of Jensen-Shannon Divergence values using PyTorch tensors.
+    
+    Parameters:
+    jsd_series (torch.Tensor): A tensor of JSD values over time.
+    threshold (float): The minimum increase considered as a bump to avoid noise (default is 0.01).
+    
+    Returns:
+    tuple: The most significant bump (index, value, magnitude) based on ranking criteria or None if no significant bumps.
+    """
+    jsd_series = torch.tensor(jsd_series)
+    
+    # Calculate the differences between consecutive elements
+    diffs = jsd_series[1:] - jsd_series[:-1]
+    
+    # Identify where the differences exceed the threshold
+    bumps_mask = diffs > threshold
+    
+    if not bumps_mask.any():
+        return informed_choice_no_bumps(jsd_series)
+    
+    # Extract indices and values of bumps
+    bump_indices = torch.nonzero(bumps_mask).flatten() + 1
+    bump_values = jsd_series[bump_indices]
+    bump_magnitudes = diffs[bumps_mask]
+    
+    # Find the most significant bump
+    max_magnitude_index = torch.argmax(bump_magnitudes)
+    most_significant_bump = (bump_indices[max_magnitude_index].item(), 
+                             bump_values[max_magnitude_index].item(), 
+                             bump_magnitudes[max_magnitude_index].item())
+    
+    return most_significant_bump
+
+
 class JSD(nn.Module):
     def __init__(self):
         super(JSD, self).__init__()
@@ -20,50 +92,6 @@ class JSD(nn.Module):
         m = (0.5 * (p + q)).log()
         return 0.5 * (self.kl(m, p.log()) + self.kl(m, q.log()))
     
-
-def plot_probits(probits, title='Probability Distribution Over Large Vocabulary', layer_exp=None, layer_am=None):
-    """
-    Plot the probability distribution for a large vocabulary indexed from 0 to len(probits)-1.
-
-    Parameters:
-        probits (list or np.array): The probabilities of the vocabulary terms.
-        title (str): Title of the plot.
-
-    Returns:
-        None. Displays the plot.
-    """
-
-    probits = probits.cpu().detach().numpy()
-
-    # Setting the style and context for a publication-quality plot
-    sns.set(style="whitegrid", context="talk", palette="muted")
-
-    # Create a new figure and set its size for better readability in papers
-    plt.figure(figsize=(12, 6))
-
-    # Use numpy to create an array of indices for the x-axis
-    indices = np.arange(len(probits))
-
-    # Creating the line plot for large vocabulary
-    plt.plot(indices, probits, marker='', color='deepskyblue', linewidth=1.5)
-
-    # Adding title and labels with enhancements
-    plt.title(title, fontsize=18, fontweight='bold')
-    plt.xlabel('Vocabulary Index', fontsize=14)
-    plt.ylabel('Probability', fontsize=14)
-
-    # Limit the display of the x-axis for clarity
-    plt.xlim(0, len(probits))
-
-    # Tight layout often provides a cleaner look especially when saving figures
-    plt.tight_layout()
-
-    # Save the figure as a high-resolution PNG, which is often used in papers
-    plt.savefig(title, dpi=300)
-
-    # Show the plot
-    plt.show()
-
 def softmax_confidence(
     logits: torch.Tensor = None,
 ):  
@@ -75,7 +103,7 @@ def softmax_confidence(
     # print("Time taken for softmax confidence", end-start)
 
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
-
+    
 
 def meta_confidence(
     hidden_states: torch.Tensor = None,
@@ -182,10 +210,7 @@ def JDS_contrastive_confidence(
     lm_logits: torch.Tensor = None,
     layer_exp: int = None, 
     prev_probits: dict = None, 
-    layer_am: int = None,
     alpha: float = None,
-    hidden_states: torch.Tensor = None,
-    classifier: torch.nn.Linear = None,
     return_jsds=True,
 ):
     """
@@ -196,7 +221,6 @@ def JDS_contrastive_confidence(
     """
     # start = datetime.datetime.now()
     assert lm_logits is not None
-
     ## calculate current layer probabilities
     probits_exp = torch.softmax(lm_logits, dim=-1).squeeze_()
     prev_probits[layer_exp] = probits_exp
@@ -221,11 +245,17 @@ def JDS_contrastive_confidence(
     jsd = JSD()
     #jsds = {k: jsd(probits_exp, v) for k, v in prev_probits.items()}
 
-    # only consider jsds between current and current // 2 layers
-    jsds = {layer: jsd(probits_exp, prev_probits[layer]) for layer in np.arange(stop = layer_exp + 1, start=2)}
+    # only consider jsds between current and 2nd layer
+    mask = probits_exp >= alpha * max_probs_exp
+    jsds = {layer: jsd(probits_exp[mask], prev_probits[layer][mask]) for layer in np.arange(stop = layer_exp + 1, start=3)}
     # get the probits with the maximum jsd
-    max_jsd_layer = max(jsds, key=jsds.get)
-    probits_am = prev_probits[max_jsd_layer]
+    #max_jsd_layer = max(jsds, key=jsds.get)
+
+    # Get list of jsds values
+    vals = list(jsds.values())
+    o = detect_and_rank_bumps(vals)
+    bump_idx = o[0]
+    probits_am = prev_probits[bump_idx + 3]
 
     # for v in prev_probits.values():
     #     probs_am = v
@@ -239,7 +269,6 @@ def JDS_contrastive_confidence(
     # s = deepcopy(probits_exp)
 
     s = torch.zeros_like(probits_exp)
-    mask = probits_exp >= alpha * max_probs_exp
     contrast = torch.log(probits_exp[mask]) - torch.log(probits_am[mask])
     s.masked_fill_(mask, contrast[0])
     # DoLA Implementation:
@@ -326,10 +355,7 @@ def get_skip_mask_cd(
             lm_logits,
             layer_exp = layer_exp, 
             prev_probits = prev_probits, 
-            layer_am = layer_am,
             alpha = alpha,
-            hidden_states = hidden_states,
-            classifier = classifier,
             return_jsds = return_jsds,
         )
     else:
