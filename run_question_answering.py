@@ -682,7 +682,10 @@ if __name__ == "__main__":
     trainer_cls = QATrainer
 
     exit_min_layer_list = [1]
+    exit_conf_type_list = ["softmax", "JDS_contrastive_confidence", "reweight_contrastive_decoding"]
     average_exit_block_list = []
+    # for framework in exit_conf_type_list:
+    #     additional_args.exit_conf_type = framework
     for layer in exit_min_layer_list:
         additional_args.exit_min_layer = layer
         wandb.login()
@@ -707,7 +710,7 @@ if __name__ == "__main__":
         # average_exit_block_list.append(average_exit_block)
 
         wandb.finish()
-            
-    
+                
+        
 
     

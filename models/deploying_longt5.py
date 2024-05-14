@@ -44,6 +44,8 @@ from util import (
     BetaMixture1D,
 )
 
+from util.skip_conf import get_skip_mask_cd
+
 logger = logging.get_logger(__name__)
 __HEAD_MASK_WARNING_MSG = """
 The input argument `head_mask` was split into two arguments `head_mask` and `decoder_head_mask`. Currently,
@@ -538,6 +540,7 @@ class DeployLongT5Stack(LongT5Stack):
         self.shallow2deep = False  # False: skip, and True: forward
         self.lm_logits = None  # to prevent calculating logits twice
 
+        prev_probits = {}
         for i, layer_module in enumerate(self.block):
                 
             # Static framework
@@ -629,6 +632,12 @@ class DeployLongT5Stack(LongT5Stack):
                 # Early-Exit framework
                 elif self.use_early_exit and not skip_mask:
                     if self.exit_min_layer is not None and i < self.exit_min_layer: 
+                        lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
+                            else lm_head(_hidden_states * (self.config.d_model ** -0.5))
+                        
+                        probits = torch.softmax(lm_logits, dim=-1)
+                        probits = torch.squeeze(probits)
+                        prev_probits[i] = probits
                         self.block_op[i] += 1
                     else:
                         if self.config.use_synchronize: torch.cuda.synchronize()
@@ -637,13 +646,55 @@ class DeployLongT5Stack(LongT5Stack):
                         lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
                             else lm_head(_hidden_states * (self.config.d_model ** -0.5))
                             
-                        skip_mask = get_skip_mask(
-                            lm_logits,
-                            _hidden_states,
-                            cm_head,
-                            config=self.config,
-                            pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
-                        )
+                        if self.config.exit_conf_type == "contrastive_decoding":
+                            
+                            skip_mask = get_skip_mask_cd(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                                layer_exp = i,
+                                prev_probits = prev_probits, 
+                                layer_am = i//2,
+                                alpha = 0.1,
+                                )
+                        
+                        elif self.config.exit_conf_type == "reweight_contrastive_decoding":
+                            
+                            skip_mask = get_skip_mask_cd(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                                layer_exp = i,
+                                prev_probits = prev_probits, 
+                                layer_am = i//2,
+                                alpha = 0.1,
+                                )
+                            
+                        elif self.config.exit_conf_type == "JDS_contrastive_confidence":
+                            
+                            skip_mask = get_skip_mask_cd(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                                layer_exp = i,
+                                prev_probits = prev_probits, 
+                                layer_am = i//2,
+                                alpha = 0.1,
+                                )
+                        else:
+                            skip_mask = get_skip_mask(
+                                lm_logits,
+                                _hidden_states,
+                                cm_head,
+                                config=self.config,
+                                pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
+                            )
                         if not skip_mask: self.block_op[i] += 1                    
                         if skip_mask: self.lm_logits = lm_logits
                         if self.config.use_synchronize: torch.cuda.synchronize()
