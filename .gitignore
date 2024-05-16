@@ -157,3 +157,5 @@ save
 *.jsonl
 *.csv
 *.sh
+
+llama-2-7b/
