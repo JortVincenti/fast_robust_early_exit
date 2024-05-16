@@ -968,7 +968,7 @@ class DeployT5Stack(T5Stack):
                         if not self.config.type_vocab_reduct: # If we are not using any vocab reduction
                             lm_logits = lm_head(_hidden_states)
                         else:
-                            starting_layer = self.confit.exit_min_layer if self.config.exit_min_layer is not None else 1 # Start where exit_min_layer is set.
+                            starting_layer = self.config.exit_min_layer if self.config.exit_min_layer is not None else 1 # Start where exit_min_layer is set.
                             if i == starting_layer: # if it is the first layer
                                 lm_logits = lm_head(_hidden_states)
                                 # Get the top 2500 logits at block 1.
@@ -995,7 +995,19 @@ class DeployT5Stack(T5Stack):
                                     # Use these selected weights to compute the logits for this layer.
                                     lm_logits = torch.nn.functional.linear(hidden_states, selected_weights)
                                 elif self.config.type_vocab_reduct == "adaptive":
-                                    raise("Not implemented yet")
+                                    if len(previous_logits > 0):
+                                        # TODO experiment with not only the top-1 confidence but combining the top-k confidences
+                                        # TODO experiment with taking the top-k not (only) in the starting layer
+                                        # TODO experiment with different formulas to go from confidence value to retained indices
+                                        # TODO experiment with non-confidence parameters (and potentialy combinations of params)
+                                        curr_weights_size = lm_head.weight.size(dim=0)
+                                        conf_scaling_factor = 0.9 # TODO experiment with different scaling factors
+                                        retained_top_k = int(curr_weights_size * (1 - conf * conf_scaling_factor))
+                                        selected_weights = lm_head.weight[self.top_k_indices[:retained_top_k], :]
+                                        lm_logits = torch.nn.functional.linear(_hidden_states, selected_weights)
+                                    else: 
+                                        lm_logits = torch.nn.functional.linear(_hidden_states, lm_head.weight)
+
                                 else: 
                                     raise("Please provide a valid type_vocab_reduct argument. Either use fixed, decaying, or adaptive.")
                         #print("shape", lm_logits.shape)
@@ -1005,12 +1017,13 @@ class DeployT5Stack(T5Stack):
                         
                         ## comparing them only when we are exiting. 
                         #print(self.config)
-                        skip_mask = get_skip_mask(
+                        skip_mask, conf = get_skip_mask(
                             lm_logits,
                             _hidden_states,
                             cm_head,
                             config=self.config,
-                            pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
+                            pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                            return_conf=True
                         )
 
                         #print("*"*100)
