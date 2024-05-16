@@ -679,7 +679,7 @@ class DeployLongT5Stack(LongT5Stack):
                                 alpha = 0.1,
                                 )
                             
-                        elif self.config.exit_conf_type == "JDS_contrastive_confidence":
+                        elif self.config.exit_conf_type == "JSD_contrastive_confidence":
                             
                             skip_mask, jsds = get_skip_mask_cd(
                                 lm_logits,

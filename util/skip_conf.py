@@ -206,7 +206,7 @@ def reweight_contrastive_confidence(
     
     return (top_2[..., 0] - top_2[..., 1]).squeeze()
  
-def JDS_contrastive_confidence(  
+def JSD_contrastive_confidence(  
     lm_logits: torch.Tensor = None,
     layer_exp: int = None, 
     prev_probits: dict = None, 
@@ -214,7 +214,7 @@ def JDS_contrastive_confidence(
     return_jsds=True,
 ):
     """
-    Checking confidence with JDS contrastive decoding.
+    Checking confidence with JSD contrastive decoding.
     First we are computing the V_head, meaning the plausibility constraint.
     Second we are getting the probits from previous iterations and comparing with a fixed one by taking the log difference.
     
@@ -299,7 +299,7 @@ def get_confidence_class(key):
         'meta': meta_confidence,
         'contrastive_decoding': contrastive_confidence,
         'reweight_contrastive_decoding': reweight_contrastive_confidence,
-        'JDS_contrastive_confidence':  JDS_contrastive_confidence,
+        'JSD_contrastive_confidence':  JSD_contrastive_confidence,
     }
 
     if key in _conf_class_map:
@@ -342,7 +342,7 @@ def get_skip_mask_cd(
 
     # print("Inside get_skip_mask_cd")
 
-    if key == 'JDS_contrastive_confidence' and not return_jsds:
+    if key == 'JSD_contrastive_confidence' and not return_jsds:
         conf = conf_measure(
             lm_logits,
             layer_exp = layer_exp, 
@@ -352,7 +352,7 @@ def get_skip_mask_cd(
             hidden_states = hidden_states,
             classifier = classifier,
         )
-    elif key == 'JDS_contrastive_confidence' and return_jsds:
+    elif key == 'JSD_contrastive_confidence' and return_jsds:
         conf, jsds = conf_measure(
             lm_logits,
             layer_exp = layer_exp, 

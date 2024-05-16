@@ -19,7 +19,7 @@ Fine-tuning the library's seq2seq models for question answering using the 🤗 S
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
 
-TESTING = False
+TESTING = True
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -824,7 +824,7 @@ if __name__ == "__main__":
     trainer_cls = QATrainer
 
     exit_min_layer_list = [1]
-    exit_conf_type_list = ["softmax", "JDS_contrastive_confidence", "reweight_contrastive_decoding"]
+    exit_conf_type_list = ["softmax", "JSD_contrastive_confidence", "reweight_contrastive_decoding"]
     average_exit_block_list = []
     # for framework in exit_conf_type_list:
     #     additional_args.exit_conf_type = framework
