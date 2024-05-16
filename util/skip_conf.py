@@ -426,7 +426,7 @@ def get_skip_mask(
     
     mask = torch.where(conf <= threshold, 0., 1.).bool()
 
-    #print(f"Confidence: {conf.item():.4f}, Threshold: {threshold:.4f}, Mask: {mask.item()}")
+    # print(f"Confidence: {conf.item():.4f}, Threshold: {threshold:.4f}, Mask: {mask.item()}")
     
     # print("Are we early exiting?", mask.item() == 1)
     # print('Confidence:', conf.item(), 'Threshold:', threshold, 'Mask:', mask.item())

@@ -36,7 +36,7 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     --context_column context \
     --question_column question \
     --answer_column answers \
-    --output_dir ./save/squad_t5-large/ \
+    --output_dir ./save/squad_t5-base/ \
     --per_device_eval_batch_size 1 \
     --deploy_scenario True \
     --use_synchronize False \
@@ -70,3 +70,4 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     # evaluate only performance
     # --deploy_scenario False \
     # --per_device_eval_batch_size 8 \
+

@@ -30,10 +30,12 @@ import sys
 import nltk
 import numpy as np
 from copy import deepcopy
+from sklearn.metrics import f1_score
 
 import seaborn as sns
 import pandas as pd
 
+import copy
 import datasets
 import evaluate
 import transformers
@@ -631,65 +633,139 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
             metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
 
 
-        data = model.decoder.graph_top_k_list
+        if additional_args.plotting_logits:
+            filtered_labels = [[item for item in sublist if item != -100] for sublist in eval_dataset["labels"]]
 
-        max_length = max(len(arr) for arr in data)
+            data = model.decoder.graph_top_k_list
+            data_conf = model.decoder.graph_top_k_confidence
+            data_top1_indices = model.decoder.graph_top_k_indices
 
-        # Pad arrays with NaNs to ensure they are all the same length
-        padded_data = [np.pad(np.array(arr, dtype=float),  # Convert array to float
-                      (0, max_length - len(arr)),
-                      mode='constant',
-                      constant_values=np.nan)
-               for arr in data]
+            full_accuracy_array = []
 
-        # Convert the list of arrays into a single NumPy array
-        padded_array = np.array(padded_data)
+            full_reconstruct_predictions =  [[] for _ in range(len(model.decoder.block))]
 
-        # Converting the array to a DataFrame for easier handling in seaborn
-        df = pd.DataFrame(padded_array)
+            count = 0 
+            printing_true_list = []
+            printing_pred_list = []
+            final_labels = copy.deepcopy(filtered_labels)
+            for true_predictions_data in filtered_labels:
+                reconstruct_predictions = [[] for _ in range(len(model.decoder.block))]
+                while len(true_predictions_data) != 0:
+                    # Model vs token prediction
+                    true_value = true_predictions_data.pop(0)
+                    predict_token_model = data_top1_indices[count]
+                
+                    printing_true_list.append(tokenizer.decode(true_value))
+                    printing_pred_list.append(tokenizer.decode(predict_token_model))
 
-        # Creating a boxplot
-        plt.figure(figsize=(12, 8))
-        sns.boxplot(data=df)
-        plt.title('Boxplot for Each Block')
-        plt.xlabel('Block')
-        plt.ylabel('Top-K value')
-        plt.grid(True)
-        plt.savefig("boxplot_topk_rank_eval.png")
+                    #print("Predict token", predict_token_model)
+                    for i in range(len(model.decoder.block)):
+                    #print("steps", i , reconstruct_predictions[i], predict_token_model[i])
+                        reconstruct_predictions[i].append(predict_token_model[i])
+                    #reconstruct_predictions = np.append(reconstruct_predictions, predict_token_model[i])
 
-        # Compute the mean of the first column
-        mean_block = np.nanmean(padded_array, axis=0)
-        min_block = np.nanmin(padded_array, axis=0)
-        max_block = np.nanmax(padded_array, axis=0)
+                    # If the model predicts end of sentence but not the true prediction
+                    if predict_token_model[-1] == 1 and true_value != 1:
+                        #print("check", predict_token_model[-1], true_value)
+                        data_top1_indices.insert(count+1, [1]*len(predict_token_model)) # Insert a one right after the end of sentence token
 
-        # Plotting
-        blocks = np.arange(mean_block.size)
+                    # If the model predicts a token but the true prediction is end of sentence
+                    if predict_token_model[-1] != 1 and true_value == 1:
+                        true_predictions_data.append(1)
 
-        plt.figure(figsize=(10, 6))
-        plt.plot(blocks, mean_block, label='Mean Top-K rank', color='midnightblue')
-        plt.fill_between(blocks, min_block, max_block, color='lightblue', alpha=0.5, label='Min/Max Range')
-        plt.title('Mean, Max and Min top-k rank over blocks')
-        plt.xlabel('Blocks')
-        plt.ylabel('Top-K rank')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig("mean_topk_rank_eval.png")
+                    if predict_token_model[-1] == 1 and true_value == 1:
+                        count += 1
+                        break
+                    count += 1 
+                for i in range(len(model.decoder.block)):
+                    full_reconstruct_predictions[i].append(reconstruct_predictions[i])           
+
+            # print("true list", printing_true_list)
+            # print("pred lsit", printing_pred_list)
+            f1_score_list = []
+            
+            for full_block_prediction in full_reconstruct_predictions:
+                # Ensure each prediction is a single list of integers
+                f1 = 0
+                for index, true_labels in enumerate(final_labels): 
+                    prediction = full_block_prediction[index]                
+                    # max_len = max(len(prediction), len(true_labels))
+                    # padded_prediction = prediction + [0] * (max_len - len(prediction))
+                    # padded_true = true_labels + [0] * (max_len - len(true_labels))
+
+                    all_labels = list(set(prediction + true_labels))
+                    pred_binary = [1 if label in prediction else 0 for label in all_labels]
+                    true_binary = [1 if label in true_labels else 0 for label in all_labels]
+
+                    # Compute F1 score
+                    block_f1 = f1_score(true_binary, pred_binary, average='binary')
+                    f1 += block_f1
+                f1_score_list.append(f1/len(final_labels))
 
 
-        # This is to plot all the lines, but it is not recommended for large datasets
-        # Plotting each array
-        # plt.figure(figsize=(10, 6))
-        # for idx, arr in enumerate(padded_data):
-        #     plt.plot(arr, label=f'Line {idx + 1}', color='blue', alpha=0.2)  # Set color and transparency
+                        
+                
 
-        # Add legend, labels, and title
-        # plt.xlabel("Block Number")
-        # plt.ylabel("Ranking Value")
-        # plt.title("Top K List Ranking Values")
-        # plt.grid(True)
+            full_accuracy_array = np.array(full_accuracy_array)
+            mean_correctness = np.mean(full_accuracy_array, axis=0)
 
-        # # Show the plot
-        # plt.savefig("top_k_list.png")
+            max_length = max(len(arr) for arr in data)
+
+            # Pad arrays with NaNs to ensure they are all the same length
+            padded_data = [np.pad(np.array(arr, dtype=float),  # Convert array to float
+                        (0, max_length - len(arr)),
+                        mode='constant',
+                        constant_values=np.nan)
+                for arr in data]
+            
+            padded_conf = [np.pad(np.array(arr, dtype=float),  # Convert array to float
+                        (0, max_length - len(arr)),
+                        mode='constant',
+                        constant_values=np.nan)
+                for arr in data_conf]
+
+            # Convert the list of arrays into a single NumPy array
+            padded_array = np.array(padded_data)
+            padded_conf_array = np.array(padded_conf)
+
+            # Converting the array to a DataFrame for easier handling in seaborn
+            df = pd.DataFrame(padded_array)
+
+            # Creating a boxplot
+            plt.figure(figsize=(12, 8))
+            sns.boxplot(data=df)
+            plt.title('Boxplot for Each Block')
+            plt.xlabel('Block')
+            plt.ylabel('Top-K value')
+            plt.grid(True)
+            plt.savefig("boxplot_topk_rank_eval.png")
+
+            # Compute the mean of the first column
+            mean_block = np.nanmean(padded_array, axis=0)
+            mean_conf_block = np.nanmean(padded_conf_array, axis=0)
+
+            # Plotting
+            blocks = np.arange(mean_block.size)
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(blocks, mean_block, label='Mean Top-K rank', color='midnightblue')
+            plt.title('Mean, Max and Min top-k rank over blocks')
+            plt.xlabel('Blocks')
+            plt.ylabel('Top-K rank')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig("mean_topk_rank_eval.png")
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(blocks, mean_conf_block, label='Mean Top-K conf', color='red', linestyle='dashed')
+            plt.plot(blocks, f1_score_list, label='Mean f1 per block', color='green', linestyle='dashed')
+            plt.title('Confidence of top-1 rank over blocks')
+            plt.xlabel('Blocks')
+            plt.ylabel('Highest Softmax Confidence')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig("conf_acc_graph.png")
+
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
