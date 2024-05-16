@@ -549,6 +549,7 @@ class DeployT5Stack(T5Stack):
         super().__init__(config, embed_tokens)
         self.graph_top_k_list = []
         self.graph_top_k_confidence = []
+        self.graph_top_k_indices = []
         self.top_k_indices = None
         
         self.embed_tokens = embed_tokens
@@ -707,8 +708,6 @@ class DeployT5Stack(T5Stack):
                 stack_hidden_states=self.stack_hidden_states if self.config.copy_skipped_hidden_states else None,
             )
 
-            
-
             for idx, t in enumerate(self.block[j].key_value_gen_time): self.deploy_time['time_parallel_key_value_gen'][idx] += t
             for idx, t in enumerate(self.block[j].attn_time): self.deploy_time['time_parallel_attn'][idx] += t
             self.deploy_time['time_parallel_ffn'] += self.block[j].ffn_time
@@ -722,23 +721,6 @@ class DeployT5Stack(T5Stack):
 
             hidden_states, present_key_value_state = layer_outputs[:2]
 
-            ## saving hidden states to compare them
-            # previous_hidden_states.append(hidden_states)
-
-            # ## comparing them only when we are exiting. 
-            # mid_index = len(previous_hidden_states) // 2
-            # last_index = len(previous_hidden_states) - 1
-            # if len(previous_hidden_states) % 2 == 0:  # if the array length is even
-            #     hidden_states = previous_hidden_states[last_index] - previous_hidden_states[mid_index]
-            # else:  # if the array length is odd
-            #     hidden_states = previous_hidden_states[last_index] - previous_hidden_states[mid_index]
-            
-            
-
-
-            # We share the position biases between the layers - the first layer store them
-            # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
-            # (cross-attention position bias), (cross-attention weights)
             position_bias = layer_outputs[2]
             if self.is_decoder and encoder_hidden_states is not None:
                 encoder_decoder_position_bias = layer_outputs[4 if output_attentions else 3]
@@ -873,9 +855,16 @@ class DeployT5Stack(T5Stack):
         self.shallow2deep = False  # False: skip, and True: forward
         self.lm_logits = None  # to prevent calculating logits twice
 
-        previous_logits = []
+        if self.is_decoder and self.config.plotting_logits:
+            previous_logits = []
+
         for i, layer_module in enumerate(self.block):
-                
+            if self.is_decoder and self.config.plotting_logits:
+                _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
+                _hidden_states = (_hidden_states * (self.config.d_model ** -0.5)) if self.config.tie_word_embeddings else _hidden_states
+                lm_logits = lm_head(_hidden_states)
+                previous_logits.append(lm_logits)
+
             # Static framework
             if self.is_decoder and self.config.static_exit_layer is not None:
                 if i == self.config.static_exit_layer: break
@@ -885,7 +874,7 @@ class DeployT5Stack(T5Stack):
             
             # check that tokens are generated once in a time
             auto_reg = True if hidden_states.shape[1] == 1 else False
-            if self.is_decoder and auto_reg and i == 0: self.block_op[i] += 1 # TO DO: Maybe implement the top_k here?
+            if self.is_decoder and auto_reg and i == 0: self.block_op[i] += 1
                             
             if self.is_decoder and auto_reg and i > 0:
                 
@@ -1009,11 +998,11 @@ class DeployT5Stack(T5Stack):
                                     raise("Not implemented yet")
                                 else: 
                                     raise("Please provide a valid type_vocab_reduct argument. Either use fixed, decaying, or adaptive.")
-
+                        #print("shape", lm_logits.shape)
                         # ====================================================================================================
                         #print("lm_logits shape is", lm_logits.shape, "for layer", i)
                         ## then teh logit comparison needs to be done here
-                        previous_logits.append(lm_logits)
+                        
                         ## comparing them only when we are exiting. 
                         #print(self.config)
                         skip_mask = get_skip_mask(
@@ -1085,16 +1074,19 @@ class DeployT5Stack(T5Stack):
             
             if self.config.use_synchronize: torch.cuda.synchronize()
             if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
-                
-        if len(previous_logits) > 0:
+
+        if self.is_decoder and self.config.plotting_logits:
             # Get the top-1 index of last block.
             index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
             #print(torch.softmax(previous_logits[-1], dim=-1).shape)
-            confidence = torch.max(torch.softmax(previous_logits[-1], dim=-1), dim=-1)[0].item()
+            confidence, max_index = torch.max(torch.softmax(previous_logits[-1], dim=-1), dim=-1)
+            confidence = confidence[0].item()
+            max_index_start = max_index[0].item()
 
             # Initialize a list to store ranks at each layer
             ranks_at_layers = []
             confidences_at_layers = []
+            max_indices_at_layers = []
 
             # Loop over previous layers in reverse order, stopping at the first layer
             for i in range(len(previous_logits) - 1, -1, -1):
@@ -1103,22 +1095,30 @@ class DeployT5Stack(T5Stack):
 
                 # Find the rank of the top-1 index of the last block in the sorted indices of block i
                 rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
-                conf = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)[0].item()
+                #conf = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)[0].item()
+
+                conf, max_index = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)
+                conf = conf[0].item()
+                max_index = max_index[0].item()
                 #print(i ,rank, conf)
                 # Store the rank positions
                 ranks_at_layers.append(rank[0])
                 confidences_at_layers.append(conf)
-                
-
-
+                max_indices_at_layers.append(max_index)
+                    
             ranks_at_layers.reverse() # Reverse the list to have the ranks in the correct order
-            ranks_at_layers.append(0) # Append 0 to the end of the list to represent the rank at the last layer
+            #ranks_at_layers.append(0) # Append 0 to the end of the list to represent the rank at the last layer
 
             confidences_at_layers.reverse() # Reverse the list to have the ranks in the correct order
-            confidences_at_layers.append(confidence) # Append 0 to the end of the list to represent the rank at the last layer
+            #confidences_at_layers.append(confidence) # Append 0 to the end of the list to represent the rank at the last layer
+
+            max_indices_at_layers.reverse() # Reverse the list to have the ranks in the correct order
+            #max_indices_at_layers.append(max_index_start)
 
             self.graph_top_k_list.append(ranks_at_layers) # Append the ranks at each layer to the list of ranks
             self.graph_top_k_confidence.append(confidences_at_layers) # Append the ranks at each layer to the list of ranks
+            self.graph_top_k_indices.append(max_indices_at_layers)
+
 
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()

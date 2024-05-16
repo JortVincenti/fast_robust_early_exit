@@ -11,6 +11,11 @@ class AdditionalArguments:
         default=False, metadata={"help": ("Reduce the size of vocab. Either use fixed, decaying, adaptive, or None.")},
     )
 
+    plotting_logits: Optional[bool] = field(
+        default=False, metadata={"help": ("Plotting the logits confidence, accuracy and top1 tokens accorss blocks.")},
+    )
+
+
     # deployment scenario
     deploy_scenario: Optional[bool] = field(
         default=False, metadata={"help": ("Assume a deploying scneario for the accurate measurement.")},
@@ -149,7 +154,8 @@ def update_autoconfig(config, additional_args, **kwargs):
         'exit_min_layer': additional_args.exit_min_layer,
         'train_meta_cm_head': additional_args.train_meta_cm_head,
         'max_answer_length': kwargs.get('max_answer_length', None),
-        'type_vocab_reduct': kwargs.get('type_vocab_reduct', None),
+        'type_vocab_reduct': additional_args.type_vocab_reduct,
+        'plotting_logits': additional_args.plotting_logits
     }
     config.update(early_exit_config)
     
