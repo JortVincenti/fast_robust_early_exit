@@ -30,13 +30,13 @@
 
 
 CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
-    --model_name_or_path t5-large \
+    --model_name_or_path t5-base \
     --do_eval \
     --dataset_name squad \
     --context_column context \
     --question_column question \
     --answer_column answers \
-    --output_dir ./save/squad_t5-large/ \
+    --output_dir ./save/squad_t5-base/ \
     --per_device_eval_batch_size 1 \
     --deploy_scenario True \
     --use_synchronize False \
@@ -45,7 +45,7 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     --max_seq_length 512 \
     --use_early_exit True \
     --exit_conf_type softmax \
-    --exit_conf_threshold 0.4 \
+    --exit_conf_threshold 1 \
     --exit_min_layer 2 \
     --max_eval_samples 100 \
     --include_inputs_for_metrics False \
@@ -66,3 +66,4 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     # evaluate only performance
     # --deploy_scenario False \
     # --per_device_eval_batch_size 8 \
+
