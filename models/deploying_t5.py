@@ -376,21 +376,30 @@ class DeployT5Block(T5Block):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__(config, has_relative_attention_bias)
         self.config = config
-        self.is_decoder = config.is_decoder
+        self.is_decoder = config.is_decoder  # Flag to check if this block is part of the decoder
+
+        # Initialize layers in the block
         self.layer = nn.ModuleList()
         self.layer.append(DeployT5LayerSelfAttention(config, has_relative_attention_bias=has_relative_attention_bias))
+        
+        ######## decoder ########
         if self.is_decoder:
+            # Add cross-attention layer only if it's a decoder
             self.layer.append(DeployT5LayerCrossAttention(config))
 
+        ######## common ########
+        # Always add the feed-forward layer
         self.layer.append(T5LayerFF(config))
     
+    ######## decoder ########
     def get_shallow_logits(self, hidden_states):
-        # Assuming self.layer[0] is the self-attention layer
+        # Generate logits from shallow hidden states (typically used in fast decoding)
         shallow_hidden_states = self.layer[0].layer_norm(hidden_states)
         shallow_hidden_states = self.dropout(shallow_hidden_states)
         shallow_logits = self.lm_head(shallow_hidden_states)
         return shallow_logits
-
+    
+    ######## decoder ########
     def gen_cross_attn_key_value(
         self,
         hidden_states,
@@ -448,7 +457,10 @@ class DeployT5Block(T5Block):
         parallel_mask=False,
         stack_hidden_states=None,
     ):
-    
+        # Process input through the block, handling both self-attention and cross-attention if applicable
+
+        ######## common ########
+        # Handling past key values for caching and faster processing
         if past_key_value is not None:
             if not self.is_decoder:
                 logger.warning("`past_key_values` is passed to the encoder. Please make sure this is intended.")
@@ -466,6 +478,8 @@ class DeployT5Block(T5Block):
         else:
             self_attn_past_key_value, cross_attn_past_key_value = None, None
 
+        ######## common ########
+        # Process self-attention
         self_attention_outputs = self.layer[0](
             hidden_states,
             attention_mask=attention_mask,
@@ -536,6 +550,7 @@ class DeployT5Block(T5Block):
 class DeployT5Stack(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
+        self.graph_top_k_list = []
         
         self.embed_tokens = embed_tokens
         self.is_decoder = config.is_decoder
@@ -1118,6 +1133,39 @@ class DeployT5Stack(T5Stack):
             if self.config.use_synchronize: torch.cuda.synchronize()
             if self.is_decoder: self.deploy_time['time_others'] += (datetime.datetime.now() - start)
         
+
+        #print("*"*100)
+        # topk, indices from the last logits tensor
+        
+        if len(previous_logits) > 0:
+            #print(len(previous_logits))
+            #print("Previous logits", torch.topk(previous_logits[-1], 1))
+            index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
+            #print("last fist index", index_top_1)
+            # Initialize a list to store ranks at each layer
+            ranks_at_layers = []
+
+            # Loop over previous layers in reverse order, stopping at the first layer
+            for i in range(len(previous_logits) - 1, -1, -1):
+                # Get the sorted indices for this layer's logits
+                sorted_indices = torch.argsort(previous_logits[i], descending=True)
+
+                # Find the rank of the indices obtained from the last layer in the current layer's sorted list
+                # We do this by looking for the position of each top index in the sorted indices list
+                rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
+
+                
+                # Store the rank positions
+                ranks_at_layers.append(rank[0])
+
+                #print(f"Layer {i} logits shape: {previous_logits[i].shape}")
+                #print(f"Rank of indices in layer {i}: {rank}")
+            ranks_at_layers.reverse()
+            ranks_at_layers.append(0)
+            #print("Full layers", ranks_at_layers, len(ranks_at_layers))
+            self.graph_top_k_list.append(ranks_at_layers)
+        #print("*"*100)
+
         if self.config.use_synchronize: torch.cuda.synchronize()
         start = datetime.datetime.now()
         if not skip_mask and self.lm_logits is None: # If threshold is "not satisfied", then compute the new block logits

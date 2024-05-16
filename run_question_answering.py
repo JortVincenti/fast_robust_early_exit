@@ -31,6 +31,9 @@ import nltk
 import numpy as np
 from copy import deepcopy
 
+import seaborn as sns
+import pandas as pd
+
 import datasets
 import evaluate
 import transformers
@@ -64,6 +67,8 @@ from util import (
     update_autoconfig,
 )
 import wandb
+
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -549,8 +554,11 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         # Let's loop over all the examples!
         for example_index, example in enumerate(examples):
             # This is the index of the feature associated to the current example.
-            feature_index = feature_per_example[example_index]
-            predictions[example["id"]] = decoded_preds[feature_index]
+            try:
+                feature_index = feature_per_example[example_index]
+                predictions[example["id"]] = decoded_preds[feature_index]
+            except:
+                predictions[example["id"]] = "fail"
 
         # Format the result to the format the metric expects.
         if data_args.version_2_with_negative:
@@ -615,22 +623,74 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         logger.info("*** Evaluate ***")
         # evaluation metrics could be differ from evaluation during training
         # refer to https://discuss.huggingface.co/t/evaluation-results-metric-during-training-is-different-from-the-evaluation-results-at-the-end/15401/3
-        
-        # Here I hook the function to be able to get all the outputs from the eval function instead of the metrics only
-    
         if training_args.include_inputs_for_metrics:
             output = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
             metrics = output.metrics
             
         else:
             metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
-        # print("eval_runtime", metrics["eval_runtime"])
-        # wandb.log({"eval_block_avg": metrics["eval_block_avg"]})
-        # wandb.log({"eval_exact_match": metrics["eval_exact_match"]})
-        # wandb.log({"eval_f1": metrics["eval_f1"]})
-        # wandb.log({"eval_runtime": metrics["eval_runtime"]})
-        # wandb.log({"eval_samples": metrics["eval_samples"]})
-        
+
+
+        data = model.decoder.graph_top_k_list
+
+        max_length = max(len(arr) for arr in data)
+
+        # Pad arrays with NaNs to ensure they are all the same length
+        padded_data = [np.pad(np.array(arr, dtype=float),  # Convert array to float
+                      (0, max_length - len(arr)),
+                      mode='constant',
+                      constant_values=np.nan)
+               for arr in data]
+
+        # Convert the list of arrays into a single NumPy array
+        padded_array = np.array(padded_data)
+
+        # Converting the array to a DataFrame for easier handling in seaborn
+        df = pd.DataFrame(padded_array)
+
+        # Creating a boxplot
+        plt.figure(figsize=(12, 8))
+        sns.boxplot(data=df)
+        plt.title('Boxplot for Each Block')
+        plt.xlabel('Block')
+        plt.ylabel('Top-K value')
+        plt.grid(True)
+        plt.savefig("boxplot_topk_rank_eval.png")
+
+        # Compute the mean of the first column
+        mean_block = np.nanmean(padded_array, axis=0)
+        min_block = np.nanmin(padded_array, axis=0)
+        max_block = np.nanmax(padded_array, axis=0)
+
+        # Plotting
+        blocks = np.arange(mean_block.size)
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(blocks, mean_block, label='Mean Top-K rank', color='midnightblue')
+        plt.fill_between(blocks, min_block, max_block, color='lightblue', alpha=0.5, label='Min/Max Range')
+        plt.title('Mean, Max and Min top-k rank over blocks')
+        plt.xlabel('Blocks')
+        plt.ylabel('Top-K rank')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("mean_topk_rank_eval.png")
+
+
+        # This is to plot all the lines, but it is not recommended for large datasets
+        # Plotting each array
+        # plt.figure(figsize=(10, 6))
+        # for idx, arr in enumerate(padded_data):
+        #     plt.plot(arr, label=f'Line {idx + 1}', color='blue', alpha=0.2)  # Set color and transparency
+
+        # Add legend, labels, and title
+        # plt.xlabel("Block Number")
+        # plt.ylabel("Ranking Value")
+        # plt.title("Top K List Ranking Values")
+        # plt.grid(True)
+
+        # # Show the plot
+        # plt.savefig("top_k_list.png")
+
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
