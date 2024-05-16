@@ -565,6 +565,7 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
     # adjust training arguments
     training_args = adjust_training_args(training_args, data_args, additional_args)
+    training_args.include_inputs_for_metrics = True
     
     trainer = trainer_cls(
         model=model,
@@ -614,8 +615,15 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
         logger.info("*** Evaluate ***")
         # evaluation metrics could be differ from evaluation during training
         # refer to https://discuss.huggingface.co/t/evaluation-results-metric-during-training-is-different-from-the-evaluation-results-at-the-end/15401/3
-        metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
-
+        
+        # Here I hook the function to be able to get all the outputs from the eval function instead of the metrics only
+    
+        if training_args.include_inputs_for_metrics:
+            output = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
+            metrics = output.metrics
+            
+        else:
+            metrics = trainer.evaluate(max_length=max_length, num_beams=num_beams, metric_key_prefix="eval")
         # print("eval_runtime", metrics["eval_runtime"])
         # wandb.log({"eval_block_avg": metrics["eval_block_avg"]})
         # wandb.log({"eval_exact_match": metrics["eval_exact_match"]})
@@ -662,8 +670,6 @@ def main(model_args, data_args, training_args, additional_args, model_cls, train
 
 
 if __name__ == "__main__":
-    # os.environ["WANDB_DISABLED"] = "true"
-
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
@@ -692,7 +698,7 @@ if __name__ == "__main__":
 
         wandb.init(
                 # set the wandb project where this run will be logged
-                project="fine-tuned-qa-models",
+                project="contrastive_decoding",
                 entity="uva24",
                 # track hyperparameters and run metadata
                 config={
@@ -704,7 +710,7 @@ if __name__ == "__main__":
                     },
                 mode="disabled" if TESTING else "online",
                 )
-
+        
         main(model_args, data_args, training_args, additional_args, model_cls, trainer_cls)
 
         # average_exit_block_list.append(average_exit_block)

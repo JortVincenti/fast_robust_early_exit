@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from transformers import Seq2SeqTrainer
+from transformers import Seq2SeqTrainer, AutoTokenizer
 from transformers.utils import is_torch_tpu_available
 from transformers.deepspeed import deepspeed_init, is_deepspeed_zero3_enabled
 from transformers.debug_utils import DebugOption
@@ -52,6 +52,10 @@ from models.deploying_longt5 import DeployLongT5ForConditionalGeneration
 class SumTrainer(Seq2SeqTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        descriptive = True
+        if descriptive:
+            self.tokenizer = AutoTokenizer.from_pretrained('google-t5/t5-large')
         
     def evaluate(
         self,
@@ -112,6 +116,9 @@ class SumTrainer(Seq2SeqTrainer):
             ignore_keys=ignore_keys,
             metric_key_prefix=metric_key_prefix,
         )
+
+        # output.predictions contains the generated tokens
+        print(self.tokenizer.batch_decode(output.predictions, skip_special_tokens=True))
             
         total_batch_size = self.args.eval_batch_size * self.args.world_size
         if f"{metric_key_prefix}_jit_compilation_time" in output.metrics:
@@ -157,6 +164,9 @@ class SumTrainer(Seq2SeqTrainer):
 
         self._memory_tracker.stop_and_update_metrics(output.metrics)
 
+        if self.args.include_inputs_for_metrics:
+            return output
+        
         return output.metrics
 
     def evaluation_loop(
@@ -238,6 +248,9 @@ class SumTrainer(Seq2SeqTrainer):
             # Prediction step
             loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
             inputs_decode = self._prepare_input(inputs["input_ids"]) if args.include_inputs_for_metrics else None
+
+            print(self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True))
+            print("-END CONTEXT-")
 
             if is_torch_tpu_available():
                 xm.mark_step()
@@ -340,7 +353,7 @@ class SumTrainer(Seq2SeqTrainer):
         if self.compute_metrics is not None and all_preds is not None and all_labels is not None:
             if args.include_inputs_for_metrics:
                 metrics = self.compute_metrics(
-                    EvalPrediction(predictions=all_preds, label_ids=all_labels, inputs=all_inputs)
+                        EvalPrediction(predictions=all_preds, label_ids=all_labels, inputs=all_inputs)
                 )
             else:
                 metrics = self.compute_metrics(EvalPrediction(predictions=all_preds, label_ids=all_labels))

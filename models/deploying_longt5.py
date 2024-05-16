@@ -16,6 +16,7 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
+from transformers import T5Tokenizer
 
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -266,6 +267,10 @@ class DeployLongT5Stack(LongT5Stack):
         if self.is_decoder:
             self._reset_time_measure()
         else: self.deploy_time = None
+
+        plot = True
+        if plot:
+            self.tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-large")
         
     def _reset_time_measure(self):
         self.deploy_time = {'time_key_value_gen': [datetime.timedelta(), datetime.timedelta()],
@@ -632,8 +637,8 @@ class DeployLongT5Stack(LongT5Stack):
                 # Early-Exit framework
                 elif self.use_early_exit and not skip_mask:
                     if self.exit_min_layer is not None and i < self.exit_min_layer: 
-                        lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
-                            else lm_head(_hidden_states * (self.config.d_model ** -0.5))
+                        lm_logits = lm_head(hidden_states) if not self.config.tie_word_embeddings \
+                            else lm_head(hidden_states * (self.config.d_model ** -0.5))
                         
                         probits = torch.softmax(lm_logits, dim=-1)
                         probits = torch.squeeze(probits)
@@ -676,7 +681,7 @@ class DeployLongT5Stack(LongT5Stack):
                             
                         elif self.config.exit_conf_type == "JDS_contrastive_confidence":
                             
-                            skip_mask = get_skip_mask_cd(
+                            skip_mask, jsds = get_skip_mask_cd(
                                 lm_logits,
                                 _hidden_states,
                                 cm_head,
@@ -686,6 +691,7 @@ class DeployLongT5Stack(LongT5Stack):
                                 prev_probits = prev_probits, 
                                 layer_am = i//2,
                                 alpha = 0.1,
+                                return_jsds=True
                                 )
                         else:
                             skip_mask = get_skip_mask(
@@ -696,7 +702,19 @@ class DeployLongT5Stack(LongT5Stack):
                                 pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1
                             )
                         if not skip_mask: self.block_op[i] += 1                    
-                        if skip_mask: self.lm_logits = lm_logits
+                        if skip_mask: 
+                            self.lm_logits = lm_logits
+                            plot = True
+                            if plot: #and len(jsds) >= 23 : # When we have all the jdss values, we can use them to check jsds between layers
+
+                                print("JSDS: ", jsds)
+                                # Plot the probits distribution
+                                probits = torch.softmax(lm_logits, dim=-1)
+                                argmax_index = torch.argmax(probits).item()
+                                # Tokenizer to get the words
+                                word = self.tokenizer.decode(argmax_index)
+
+                                print("Word: ", word, " Token_id: ", argmax_index)
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
                     
@@ -1004,6 +1022,19 @@ class DeployLongT5ForConditionalGeneration(LongT5ForConditionalGeneration):
         self.decoder._reset_time_measure()
         
         return encoder_outputs, decoder_outputs
+    
+    @staticmethod
+    def apply_repetition_penalty(logits, input_ids, penalty=1.2):
+        if penalty == 1.0:
+            return logits
+
+        for i in range(input_ids.shape[0]):
+            for token_id in set(input_ids[i].tolist()):
+                if logits[i, token_id] < 0:
+                    logits[i, token_id] *= penalty
+                else:
+                    logits[i, token_id] /= penalty
+        return logits
 
     def greedy_search(
         self,
@@ -1154,6 +1185,8 @@ class DeployLongT5ForConditionalGeneration(LongT5ForConditionalGeneration):
                 self.deploy_time['time_decoder_forward'] += (datetime.datetime.now() - start)
 
             next_token_logits = outputs.logits[:, -1, :]
+
+            next_token_logits = self.apply_repetition_penalty(next_token_logits, input_ids, penalty=1.2)
 
             # pre-process distribution
             next_tokens_scores = logits_processor(input_ids, next_token_logits)

@@ -30,13 +30,13 @@
 
 
 CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
-    --model_name_or_path t5-3b \
+    --model_name_or_path jvelja/t5-squad \
     --do_eval \
     --dataset_name squad \
     --context_column context \
     --question_column question \
     --answer_column answers \
-    --output_dir ./save/squad_t5-3b/ \
+    --output_dir ./save/squad_t5-large/ \
     --per_device_eval_batch_size 1 \
     --deploy_scenario True \
     --use_synchronize False \
@@ -44,11 +44,15 @@ CUDA_VISIBLE_DEVICES=0 python -m run_question_answering \
     --predict_with_generate \
     --max_seq_length 512 \
     --use_early_exit True \
-    --exit_conf_type reweight_contrastive_decoding \
+    --exit_conf_type JDS_contrastive_confidence \
     --exit_conf_threshold 0.9 \
-    --exit_min_layer 17 \
+    --exit_min_layer 2 \
+    --include_inputs_for_metrics True \
     --max_eval_samples 100 \
-    --include_inputs_for_metrics False \
+    --use_auth_token True \
+   
+
+   # JDS_contrastive_confidence
 
     # FREE
     # --use_shallow_deep True \

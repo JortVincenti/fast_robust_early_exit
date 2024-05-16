@@ -13,7 +13,6 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
-from util.skip_conf import plot_probits
 from transformers import T5Tokenizer
 
 from transformers.modeling_outputs import (
@@ -578,7 +577,7 @@ class DeployT5Stack(T5Stack):
             self._reset_time_measure()
         else: self.deploy_time = None
         
-        plot = False
+        plot = True
         if plot:
             self.tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-large")
         
@@ -958,7 +957,7 @@ class DeployT5Stack(T5Stack):
 
                 # Early-Exit framework
                 elif self.use_early_exit and not skip_mask:
-                    if (self.exit_min_layer is not None and i < self.exit_min_layer) or i == 1: 
+                    if (self.exit_min_layer is not None and i < self.exit_min_layer) or i == 1:
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         # start = datetime.datetime.now()
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
@@ -971,15 +970,13 @@ class DeployT5Stack(T5Stack):
                         self.block_op[i] += 1
 
                     else:
-                        # print(f"Passing through Layer {i}")
+    
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         start = datetime.datetime.now()
                         _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
                         lm_logits = lm_head(_hidden_states) if not self.config.tie_word_embeddings \
                             else lm_head(_hidden_states * (self.config.d_model ** -0.5))
-
-                        # previous_logits.append(lm_logits)
-
+                        
                         if self.config.exit_conf_type == "contrastive_decoding":
                             
                             skip_mask = get_skip_mask_cd(
@@ -1010,7 +1007,19 @@ class DeployT5Stack(T5Stack):
                             
                         elif self.config.exit_conf_type == "JDS_contrastive_confidence":
                             
-                            skip_mask = get_skip_mask_cd(
+                            # skip_mask = get_skip_mask_cd(
+                            #     lm_logits,
+                            #     _hidden_states,
+                            #     cm_head,
+                            #     config=self.config,
+                            #     pos_time=past_key_values[i][0].shape[2] + 1 if past_key_values[i] is not None else 1,
+                            #     layer_exp = i,
+                            #     prev_probits = prev_probits, 
+                            #     layer_am = i//2,
+                            #     alpha = 0.1,
+                            #     )
+                            
+                            skip_mask, jsds = get_skip_mask_cd(
                                 lm_logits,
                                 _hidden_states,
                                 cm_head,
@@ -1020,6 +1029,7 @@ class DeployT5Stack(T5Stack):
                                 prev_probits = prev_probits, 
                                 layer_am = i//2,
                                 alpha = 0.1,
+                                return_jsds=True
                                 )
                         else:
 
@@ -1037,22 +1047,19 @@ class DeployT5Stack(T5Stack):
                         if skip_mask: 
                             # print("Layer: ", i) 
                             self.lm_logits = lm_logits # This is where the logits are sent to do the predictions.
-                            plot = False
+    
+                            plot = True
+                            if plot: #and len(jsds) >= 23 : # When we have all the jdss values, we can use them to check jsds between layers
 
-                            if plot:
+                                print("JSDS: ", jsds)
                                 # Plot the probits distribution
                                 probits = torch.softmax(lm_logits, dim=-1)
                                 argmax_index = torch.argmax(probits).item()
                                 # Tokenizer to get the words
                                 word = self.tokenizer.decode(argmax_index)
 
-                                print(probits.shape)
-                                print("Word: ", word) 
-                                print("Layer: ", i)
-
-                                plot_probits(probits.squeeze(), title="Probits Distribution, word : {} Layer: ".format(word) + str(i) ) if word != "</s>" else None
-
-
+                                print("Word: ", word, " Token_id: ", argmax_index)
+                    
 
                         if self.config.use_synchronize: torch.cuda.synchronize()
                         self.deploy_time['time_confidence'] += (datetime.datetime.now() - start)
@@ -1369,6 +1376,19 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
         self.decoder._reset_time_measure()
 
         return encoder_outputs, decoder_outputs
+    
+    @staticmethod
+    def apply_repetition_penalty(logits, input_ids, penalty=1.2):
+        if penalty == 1.0:
+            return logits
+
+        for i in range(input_ids.shape[0]):
+            for token_id in set(input_ids[i].tolist()):
+                if logits[i, token_id] < 0:
+                    logits[i, token_id] *= penalty
+                else:
+                    logits[i, token_id] /= penalty
+        return logits
 
     def greedy_search(
         self,
@@ -1519,6 +1539,8 @@ class DeployT5ForConditionalGeneration(T5ForConditionalGeneration):
                 self.deploy_time['time_decoder_forward'] += (datetime.datetime.now() - start)
 
             next_token_logits = outputs.logits[:, -1, :]
+
+            next_token_logits = self.apply_repetition_penalty(next_token_logits, input_ids, penalty=1.2)
 
             # pre-process distribution
             next_tokens_scores = logits_processor(input_ids, next_token_logits)
