@@ -224,6 +224,9 @@ class DeployLongT5Block(LongT5Block):
 class DeployLongT5Stack(LongT5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens)
+        self.graph_top_k_list = []
+        self.graph_top_k_confidence = []
+        self.graph_top_k_indices = []
         
         self.embed_tokens = embed_tokens
         self.is_decoder = config.is_decoder
@@ -546,7 +549,14 @@ class DeployLongT5Stack(LongT5Stack):
         self.lm_logits = None  # to prevent calculating logits twice
 
         prev_probits = {}
+        previous_logits = []
         for i, layer_module in enumerate(self.block):
+
+            if self.is_decoder and self.config.plotting_logits:
+                _hidden_states = self.dropout(self.final_layer_norm(hidden_states))
+                _hidden_states = (_hidden_states * (self.config.d_model ** -0.5)) if self.config.tie_word_embeddings else _hidden_states
+                lm_logits = lm_head(_hidden_states)
+                previous_logits.append(lm_logits)
                 
             # Static framework
             if self.is_decoder and self.config.static_exit_layer is not None:
@@ -745,6 +755,52 @@ class DeployLongT5Stack(LongT5Stack):
                 for idx, t in enumerate(layer_module.key_value_gen_time): self.deploy_time[prefix + 'key_value_gen'][idx] += t
                 for idx, t in enumerate(layer_module.attn_time): self.deploy_time[prefix + 'attn'][idx] += t
                 self.deploy_time[prefix + 'ffn'] += layer_module.ffn_time
+
+
+            if self.is_decoder and self.config.plotting_logits:
+                # Get the top-1 index of last block.
+                index_top_1 = torch.topk(previous_logits[-1], 1)[1][0][0][0].item()
+                #print(torch.softmax(previous_logits[-1], dim=-1).shape)
+                confidence, max_index = torch.max(torch.softmax(previous_logits[-1], dim=-1), dim=-1)
+                confidence = confidence[0].item()
+                max_index_start = max_index[0].item()
+
+                # Initialize a list to store ranks at each layer
+                ranks_at_layers = []
+                confidences_at_layers = []
+                max_indices_at_layers = []
+
+                # Loop over previous layers in reverse order, stopping at the first layer
+                for i in range(len(previous_logits) - 1, -1, -1):
+                    # Get the sorted indices for this layer's logits
+                    sorted_indices = torch.argsort(previous_logits[i][-1], descending=True)
+
+                    # Find the rank of the top-1 index of the last block in the sorted indices of block i
+                    rank = np.where(sorted_indices.cpu() == index_top_1)[-1]
+                    #conf = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)[0].item()
+
+                    conf, max_index = torch.max(torch.softmax(previous_logits[i], dim=-1), dim=-1)
+                    conf = conf[0].item()
+                    max_index = max_index[0].item()
+                    #print(i ,rank, conf)
+                    # Store the rank positions
+                    ranks_at_layers.append(rank[0])
+                    confidences_at_layers.append(conf)
+                    max_indices_at_layers.append(max_index)
+                        
+                ranks_at_layers.reverse() # Reverse the list to have the ranks in the correct order
+                #ranks_at_layers.append(0) # Append 0 to the end of the list to represent the rank at the last layer
+
+                confidences_at_layers.reverse() # Reverse the list to have the ranks in the correct order
+                #confidences_at_layers.append(confidence) # Append 0 to the end of the list to represent the rank at the last layer
+
+                max_indices_at_layers.reverse() # Reverse the list to have the ranks in the correct order
+                #max_indices_at_layers.append(max_index_start)
+
+                self.graph_top_k_list.append(ranks_at_layers) # Append the ranks at each layer to the list of ranks
+                self.graph_top_k_confidence.append(confidences_at_layers) # Append the ranks at each layer to the list of ranks
+                self.graph_top_k_indices.append(max_indices_at_layers)
+
 
             if self.config.use_synchronize: torch.cuda.synchronize()
             start = datetime.datetime.now()

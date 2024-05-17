@@ -118,7 +118,7 @@ class SumTrainer(Seq2SeqTrainer):
         )
 
         # output.predictions contains the generated tokens
-        print(self.tokenizer.batch_decode(output.predictions, skip_special_tokens=True))
+        #print(self.tokenizer.batch_decode(output.predictions, skip_special_tokens=True))
             
         total_batch_size = self.args.eval_batch_size * self.args.world_size
         if f"{metric_key_prefix}_jit_compilation_time" in output.metrics:
@@ -249,8 +249,8 @@ class SumTrainer(Seq2SeqTrainer):
             loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
             inputs_decode = self._prepare_input(inputs["input_ids"]) if args.include_inputs_for_metrics else None
 
-            print(self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True))
-            print("-END CONTEXT-")
+            #print(self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True))
+            #print("-END CONTEXT-")
 
             if is_torch_tpu_available():
                 xm.mark_step()
